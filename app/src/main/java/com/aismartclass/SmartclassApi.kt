@@ -25,6 +25,12 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
 
     fun tests(classId: String): JSONArray = requestArray("/api/classes/$classId/tests")
 
+    fun mockTests(classId: String): JSONArray = requestArray("/api/classes/$classId/mock-tests")
+
+    fun mockQuestions(testId: String): JSONArray = requestArray("/api/mock-tests/$testId/questions")
+
+    fun latestMockAttempt(testId: String): JSONObject = requestJson("/api/mock-tests/$testId/my-latest-attempt", "GET", null)
+
     fun plans(classId: String): JSONArray = requestArray("/api/classes/$classId/plans")
 
     fun submissions(classId: String, isTeacher: Boolean): JSONArray = requestArray(
@@ -38,6 +44,17 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
             .put("subject", subject)
             .put("kind", kind)
             .put("due_date", dueDate))
+
+    fun updateTest(testId: String, title: String, subject: String, kind: String, dueDate: String): JSONObject =
+        requestJson("/api/tests/$testId", "PATCH", JSONObject()
+            .put("title", title).put("subject", subject).put("kind", kind).put("due_date", dueDate))
+
+    fun deleteTest(testId: String): JSONObject = requestJson("/api/tests/$testId", "DELETE", JSONObject())
+
+    fun submitMockAttempt(testId: String, answers: JSONObject): JSONObject =
+        requestJson("/api/mock-tests/$testId/attempts", "POST", JSONObject().put("answers", answers))
+
+    fun viewMockAdvice(attemptId: String): JSONObject = requestJson("/api/mock-attempts/$attemptId/advice", "POST", JSONObject())
 
     fun uploadTestPaper(testId: String, filename: String, bytes: ByteArray) =
         requestMultipart("/api/tests/$testId/paper", "paper", filename, bytes)
@@ -55,8 +72,8 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
 
     private fun requestArray(path: String): JSONArray = JSONArray(String(requestBytes(path, "GET", null, null), Charsets.UTF_8))
 
-    private fun requestJson(path: String, method: String, body: JSONObject): JSONObject =
-        JSONObject(String(requestBytes(path, method, body.toString().toByteArray(Charsets.UTF_8), "application/json"), Charsets.UTF_8))
+    private fun requestJson(path: String, method: String, body: JSONObject?): JSONObject =
+        JSONObject(String(requestBytes(path, method, body?.toString()?.toByteArray(Charsets.UTF_8), if (body == null) null else "application/json"), Charsets.UTF_8))
 
     private fun requestMultipart(path: String, partName: String, filename: String, fileBytes: ByteArray): JSONObject {
         val boundary = "Smartclass-${System.nanoTime()}"

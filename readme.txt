@@ -9,7 +9,7 @@ Build the APK with:
 	./gradlew assembleDebug
 
 APK output:
-	AIClassroom_v0.8.apk
+	AIClassroom_v0.9.apk
 
 Release versions
 ----------------
@@ -57,6 +57,13 @@ grading references and are sent to the configured provider with each submission.
 PDF to the phone, sign in as a student, open a test, and submit it. Backend and
 Android failures are logged to the backend console and Android Logcat (tag:
 AIClassroom); logs avoid PDF contents and API keys.
+
+Teachers can edit test details, replace a question-paper PDF, or delete a test.
+Deleting a test also removes its submissions, evaluations, and uploaded files.
+Students can take the anytime Algebra Quick Check MCQ repeatedly. The server
+scores each attempt; Gemini/OpenAI advice is generated only when the student
+asks to view it, and only the latest generated advice per student/test is kept.
+This text-only mock is intended to demonstrate AI feedback without PDF input.
 
 Set `AI_PROVIDER=gemini` to use Gemini only, `AI_PROVIDER=openai` to use OpenAI
 only, or `AI_PROVIDER=auto` to try Gemini first and then OpenAI if Gemini fails.

@@ -72,6 +72,9 @@ private data class LoggedInUser(val id: String, val name: String, val username: 
 private data class PublishedTest(val id: String, val title: String, val subject: String, val kind: String, val dueDate: String, val questions: Int, val hasPaper: Boolean)
 private data class StudentWork(val id: String, val testId: String, val title: String, val status: String, val score: String?, val maxScore: String?, val feedback: List<String>, val teacherAdvice: String, val studentName: String?)
 private data class WeeklyTarget(val title: String, val target: String, val week: String)
+private data class MockTest(val id: String, val title: String, val subject: String, val description: String, val questions: Int)
+private data class MockQuestion(val id: String, val prompt: String, val options: List<String>)
+private data class MockAttempt(val id: String, val testId: String, val score: Int, val maxScore: Int, val attemptNumber: Int, val answers: Map<String, Int>, val lastAdvice: String?)
 
 class ClassroomActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -93,11 +96,19 @@ private fun ClassroomApp(context: Context) {
     var activePage by remember { mutableStateOf("Home") }
     var showCreateTest by remember { mutableStateOf(false) }
     var showCreatePlan by remember { mutableStateOf(false) }
+    var editingTest by remember { mutableStateOf<PublishedTest?>(null) }
+    var deletingTest by remember { mutableStateOf<PublishedTest?>(null) }
     var selectedAdvice by remember { mutableStateOf<StudentWork?>(null) }
     var pendingTestId by remember { mutableStateOf<String?>(null) }
     val tests = remember { mutableStateListOf<PublishedTest>() }
     val submissions = remember { mutableStateListOf<StudentWork>() }
     val plans = remember { mutableStateListOf<WeeklyTarget>() }
+    val mockTests = remember { mutableStateListOf<MockTest>() }
+    val mockQuestions = remember { mutableStateListOf<MockQuestion>() }
+    var activeMockTest by remember { mutableStateOf<MockTest?>(null) }
+    var mockAnswers by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    var mockAttempt by remember { mutableStateOf<MockAttempt?>(null) }
+    var mockAdvice by remember { mutableStateOf<String?>(null) }
 
     val showError: (String, String) -> Unit = { title, message ->
         errorTitle = title
@@ -125,6 +136,7 @@ private fun ClassroomApp(context: Context) {
         val freshTests = parseTests(api.tests(user.classId))
         val freshSubmissions = parseSubmissions(api.submissions(user.classId, user.role == "teacher"))
         val freshPlans = if (user.role == "teacher") parsePlans(api.plans(user.classId)) else emptyList()
+        val freshMockTests = parseMockTests(api.mockTests(user.classId))
         activity.runOnUiThread {
             tests.clear()
             tests.addAll(freshTests)
@@ -132,6 +144,25 @@ private fun ClassroomApp(context: Context) {
             submissions.addAll(freshSubmissions)
             plans.clear()
             plans.addAll(freshPlans)
+            mockTests.clear()
+            mockTests.addAll(freshMockTests)
+        }
+    }
+
+    val startMockTest: (MockTest) -> Unit = { mockTest ->
+        val currentUser = session
+        if (currentUser != null) execute("Couldn't open mock test") {
+            val api = SmartclassApi(backendUrl, currentUser.token)
+            val questions = parseMockQuestions(api.mockQuestions(mockTest.id))
+            val attempt = parseLatestMockAttempt(api.latestMockAttempt(mockTest.id))
+            activity.runOnUiThread {
+                activeMockTest = mockTest
+                mockQuestions.clear()
+                mockQuestions.addAll(questions)
+                mockAttempt = attempt
+                mockAnswers = attempt?.answers ?: emptyMap()
+                mockAdvice = attempt?.lastAdvice
+            }
         }
     }
 
@@ -254,11 +285,43 @@ private fun ClassroomApp(context: Context) {
                         }
                     },
                     onShowAdvice = { selectedAdvice = it },
+                    onEditTest = { editingTest = it },
+                    onDeleteTest = { deletingTest = it },
                     onRetryEvaluation = { work ->
                         val currentUser = session ?: return@PortalScreen
                         execute("AI review failed") {
                             SmartclassApi(backendUrl, currentUser.token).evaluate(work.id)
                             refreshDashboard(SmartclassApi(backendUrl, currentUser.token), currentUser)
+                        }
+                    },
+                    mockTests = mockTests,
+                    activeMockTest = activeMockTest,
+                    mockQuestions = mockQuestions,
+                    mockAnswers = mockAnswers,
+                    mockAttempt = mockAttempt,
+                    mockAdvice = mockAdvice,
+                    onStartMock = startMockTest,
+                    onExitMock = { activeMockTest = null; mockAttempt = null; mockAdvice = null },
+                    onSelectMockAnswer = { questionId, option -> mockAnswers = mockAnswers + (questionId to option) },
+                    onSubmitMock = {
+                        val currentUser = session
+                        val currentTest = activeMockTest
+                        if (currentUser != null && currentTest != null) execute("Couldn't submit mock test") {
+                            val answerJson = JSONObject().apply { mockAnswers.forEach { (questionId, option) -> put(questionId, option) } }
+                            val response = SmartclassApi(backendUrl, currentUser.token).submitMockAttempt(currentTest.id, answerJson)
+                            activity.runOnUiThread {
+                                mockAttempt = MockAttempt(response.getString("id"), currentTest.id, response.getInt("score"), response.getInt("max_score"), response.getInt("attempt_number"), mockAnswers, null)
+                                mockAdvice = null
+                            }
+                        }
+                    },
+                    onRetakeMock = { mockAttempt = null; mockAnswers = emptyMap(); mockAdvice = null },
+                    onViewMockAdvice = {
+                        val currentUser = session
+                        val currentAttempt = mockAttempt
+                        if (currentUser != null && currentAttempt != null) execute("Couldn't get mock-test advice") {
+                            val response = SmartclassApi(backendUrl, currentUser.token).viewMockAdvice(currentAttempt.id)
+                            activity.runOnUiThread { mockAdvice = response.getString("advice") }
                         }
                     },
                     onAddPlanClick = { showCreatePlan = true },
@@ -284,6 +347,38 @@ private fun ClassroomApp(context: Context) {
             }
         }
     )
+    editingTest?.let { test ->
+        EditTestDialog(
+            test = test,
+            onDismiss = { editingTest = null },
+            onSave = { title, subject, kind, dueDate ->
+                val currentUser = session ?: return@EditTestDialog
+                execute("Couldn't update test") {
+                    val api = SmartclassApi(backendUrl, currentUser.token)
+                    api.updateTest(test.id, title, subject, kind, dueDate)
+                    refreshDashboard(api, currentUser)
+                    activity.runOnUiThread { editingTest = null }
+                }
+            }
+        )
+    }
+    deletingTest?.let { test ->
+        AlertDialog(
+            onDismissRequest = { deletingTest = null },
+            title = { Text("Delete class test?", color = ClassroomInk) },
+            text = { Text("${test.title}, its submissions, reviews, and attached PDFs will be deleted.", color = ClassroomMuted) },
+            confirmButton = { TextButton(onClick = {
+                val currentUser = session ?: return@TextButton
+                execute("Couldn't delete test") {
+                    val api = SmartclassApi(backendUrl, currentUser.token)
+                    api.deleteTest(test.id)
+                    refreshDashboard(api, currentUser)
+                    activity.runOnUiThread { deletingTest = null }
+                }
+            }) { Text("Delete", color = ClassroomCoral) } },
+            dismissButton = { TextButton(onClick = { deletingTest = null }) { Text("Keep test", color = ClassroomMuted) } }
+        )
+    }
     if (showCreatePlan) CreatePlanDialog(
         onDismiss = { showCreatePlan = false },
         onCreate = { title, target ->
@@ -305,6 +400,8 @@ private fun ClassroomApp(context: Context) {
         )
     }
 }
+
+private fun mockAdviceReset() = Unit
 
 @Composable
 private fun LoginScreen(backendUrl: String, onBackendUrlChange: (String) -> Unit, loading: Boolean, onPing: () -> Unit, onLogin: (String) -> Unit) {
@@ -336,14 +433,28 @@ private fun PortalScreen(
     tests: List<PublishedTest>,
     submissions: List<StudentWork>,
     plans: List<WeeklyTarget>,
+    mockTests: List<MockTest>,
+    activeMockTest: MockTest?,
+    mockQuestions: List<MockQuestion>,
+    mockAnswers: Map<String, Int>,
+    mockAttempt: MockAttempt?,
+    mockAdvice: String?,
     onPage: (String) -> Unit,
     onLogout: () -> Unit,
     onUploadQuestionPaper: (PublishedTest) -> Unit,
     onSubmitAnswers: (PublishedTest) -> Unit,
+    onEditTest: (PublishedTest) -> Unit,
+    onDeleteTest: (PublishedTest) -> Unit,
     onOpenPaper: (String, String) -> Unit,
     onOpenAnswer: (StudentWork) -> Unit,
     onShowAdvice: (StudentWork) -> Unit,
     onRetryEvaluation: (StudentWork) -> Unit,
+    onStartMock: (MockTest) -> Unit,
+    onExitMock: () -> Unit,
+    onSelectMockAnswer: (String, Int) -> Unit,
+    onSubmitMock: () -> Unit,
+    onRetakeMock: () -> Unit,
+    onViewMockAdvice: () -> Unit,
     onAddPlanClick: () -> Unit,
     onAddTestClick: () -> Unit
 ) {
@@ -367,6 +478,7 @@ private fun PortalScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(7.dp), modifier = Modifier.fillMaxWidth()) {
                     PortalTab("Home", activePage, onPage)
                     PortalTab("Tests", activePage, onPage)
+                    if (!teacher) PortalTab("Mock", activePage, onPage)
                     PortalTab(if (teacher) "Reviews" else "My work", activePage, onPage)
                     if (teacher) PortalTab("Plans", activePage, onPage)
                 }
@@ -378,7 +490,39 @@ private fun PortalScreen(
                     if (teacher) item { PrimaryAction("＋  Create test and upload PDF", onAddTestClick) }
                     if (tests.isEmpty()) item { EmptyPortalState("No tests published", "Published tests for this class will appear here.") }
                     items(tests, key = { it.id }) { test ->
-                        TestCard(test, teacher, submissions.any { it.testId == test.id }, onOpenPaper, onUploadQuestionPaper, onSubmitAnswers)
+                        TestCard(test, teacher, submissions.any { it.testId == test.id }, onOpenPaper, onUploadQuestionPaper, onSubmitAnswers, onEditTest, onDeleteTest)
+                    }
+                }
+                "Mock" -> {
+                    if (activeMockTest == null) {
+                        item { SectionTitle("Anytime practice", "CLASS 09 ALGEBRA") }
+                        if (mockTests.isEmpty()) item { EmptyPortalState("No mock tests available", "Mock tests will appear here when added to your class.") }
+                        items(mockTests, key = { it.id }) { mockTest -> MockTestCard(mockTest) { onStartMock(mockTest) } }
+                    } else {
+                        item {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                SectionTitle(activeMockTest.title, "${activeMockTest.questions} MCQS")
+                                TextButton(onClick = onExitMock) { Text("Close", color = ClassroomTeal) }
+                            }
+                        }
+                        if (mockAttempt == null) {
+                            item { Text("Choose one answer for each question, then submit. You can retake this whenever you like.", color = ClassroomMuted, fontSize = 12.sp) }
+                            items(mockQuestions, key = { it.id }) { question -> MockQuestionCard(question, mockAnswers[question.id]) { option -> onSelectMockAnswer(question.id, option) } }
+                            item {
+                                Button(onClick = onSubmitMock, enabled = mockQuestions.isNotEmpty() && mockAnswers.size == mockQuestions.size && !loading, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = ClassroomTeal), shape = RoundedCornerShape(5.dp)) {
+                                    Text("Submit mock test", color = Color.White)
+                                }
+                            }
+                        } else {
+                            item { MockResultPanel(mockAttempt) }
+                            if (mockAdvice != null) item { MockAdvicePanel(mockAdvice) }
+                            item {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(onClick = onViewMockAdvice, enabled = !loading, modifier = Modifier.weight(1f), shape = RoundedCornerShape(5.dp)) { Text(if (mockAdvice == null) "View AI advice" else "Refresh advice", color = ClassroomTeal, fontSize = 11.sp) }
+                                    Button(onClick = onRetakeMock, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ClassroomTeal), shape = RoundedCornerShape(5.dp)) { Text("Retake test", color = Color.White, fontSize = 11.sp) }
+                                }
+                            }
+                        }
                     }
                 }
                 "Reviews", "My work" -> {
@@ -405,9 +549,9 @@ private fun PortalScreen(
                     item { SectionTitle(if (teacher) "Classroom activity" else "Next up", if (teacher) "YOUR CLASS" else "CLASS 09") }
                     if (teacher) {
                         item { PrimaryAction("＋  Upload a question paper") { onAddTestClick() } }
-                        items(tests.take(2), key = { it.id }) { test -> TestCard(test, true, false, onOpenPaper, onUploadQuestionPaper, onSubmitAnswers) }
+                        items(tests.take(2), key = { it.id }) { test -> TestCard(test, true, false, onOpenPaper, onUploadQuestionPaper, onSubmitAnswers, onEditTest, onDeleteTest) }
                     } else {
-                        items(tests.take(2), key = { it.id }) { test -> TestCard(test, false, submissions.any { it.testId == test.id }, onOpenPaper, onUploadQuestionPaper, onSubmitAnswers) }
+                        items(tests.take(2), key = { it.id }) { test -> TestCard(test, false, submissions.any { it.testId == test.id }, onOpenPaper, onUploadQuestionPaper, onSubmitAnswers, onEditTest, onDeleteTest) }
                         if (submissions.isNotEmpty()) item { SectionTitle("Latest feedback", "YOUR WORK") }
                         items(submissions.take(2), key = { it.id }) { work -> WorkCard(work, false, onOpenPaper, onOpenAnswer, onShowAdvice, onRetryEvaluation) }
                     }
@@ -415,7 +559,7 @@ private fun PortalScreen(
             }
         }
         Row(Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 8.dp, vertical = 8.dp), horizontalArrangement = Arrangement.SpaceAround) {
-            listOf("Home", "Tests", if (teacher) "Reviews" else "My work").forEach { PortalTabBottom(it, activePage, onPage) }
+            listOfNotNull("Home", "Tests", if (teacher) null else "Mock", if (teacher) "Reviews" else "My work").forEach { PortalTabBottom(it, activePage, onPage) }
             if (teacher) PortalTabBottom("Plans", activePage, onPage)
         }
     }
@@ -445,7 +589,7 @@ private fun SectionTitle(title: String, eyebrow: String) {
 }
 
 @Composable
-private fun TestCard(test: PublishedTest, teacher: Boolean, submitted: Boolean, onOpenPaper: (String, String) -> Unit, onUploadQuestionPaper: (PublishedTest) -> Unit, onSubmitAnswers: (PublishedTest) -> Unit) {
+private fun TestCard(test: PublishedTest, teacher: Boolean, submitted: Boolean, onOpenPaper: (String, String) -> Unit, onUploadQuestionPaper: (PublishedTest) -> Unit, onSubmitAnswers: (PublishedTest) -> Unit, onEditTest: (PublishedTest) -> Unit, onDeleteTest: (PublishedTest) -> Unit) {
     Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(7.dp)).padding(14.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(test.kind.uppercase(), color = ClassroomTeal, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
@@ -453,11 +597,95 @@ private fun TestCard(test: PublishedTest, teacher: Boolean, submitted: Boolean, 
         }
         Text(test.title, color = ClassroomInk, fontSize = 17.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
         Text("${test.subject}  ·  ${test.questions} questions", color = ClassroomMuted, fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp, bottom = 10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (test.hasPaper) OutlinedButton(onClick = { onOpenPaper(test.id, test.title) }, shape = RoundedCornerShape(5.dp)) { Text("View paper", color = ClassroomTeal, fontSize = 11.sp) }
-            if (teacher && !test.hasPaper) OutlinedButton(onClick = { onUploadQuestionPaper(test) }, shape = RoundedCornerShape(5.dp)) { Text("Upload PDF", color = ClassroomTeal, fontSize = 11.sp) }
-            if (!teacher && test.hasPaper) Button(onClick = { onSubmitAnswers(test) }, enabled = !submitted, colors = ButtonDefaults.buttonColors(containerColor = ClassroomTeal), shape = RoundedCornerShape(5.dp)) { Text(if (submitted) "Submitted" else "Submit answers", fontSize = 11.sp) }
+        if (teacher) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (test.hasPaper) OutlinedButton(onClick = { onOpenPaper(test.id, test.title) }, shape = RoundedCornerShape(5.dp)) { Text("View paper", color = ClassroomTeal, fontSize = 10.sp) }
+                OutlinedButton(onClick = { onUploadQuestionPaper(test) }, shape = RoundedCornerShape(5.dp)) { Text(if (test.hasPaper) "Replace PDF" else "Upload PDF", color = ClassroomTeal, fontSize = 10.sp) }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { onEditTest(test) }) { Text("Edit", color = ClassroomTeal, fontSize = 10.sp) }
+                TextButton(onClick = { onDeleteTest(test) }) { Text("Delete", color = ClassroomCoral, fontSize = 10.sp) }
+                }
+            }
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (test.hasPaper) OutlinedButton(onClick = { onOpenPaper(test.id, test.title) }, shape = RoundedCornerShape(5.dp)) { Text("View paper", color = ClassroomTeal, fontSize = 11.sp) }
+                if (test.hasPaper) Button(onClick = { onSubmitAnswers(test) }, enabled = !submitted, colors = ButtonDefaults.buttonColors(containerColor = ClassroomTeal), shape = RoundedCornerShape(5.dp)) { Text(if (submitted) "Submitted" else "Submit answers", fontSize = 11.sp) }
+            }
         }
+    }
+}
+
+@Composable
+private fun EditTestDialog(test: PublishedTest, onDismiss: () -> Unit, onSave: (String, String, String, String) -> Unit) {
+    var title by remember(test.id) { mutableStateOf(test.title) }
+    var subject by remember(test.id) { mutableStateOf(test.subject) }
+    var kind by remember(test.id) { mutableStateOf(test.kind) }
+    var dueDate by remember(test.id) { mutableStateOf(test.dueDate) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit class test", color = ClassroomInk, fontFamily = FontFamily.Serif) },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(title, { title = it }, label = { Text("Test title") }, singleLine = true)
+            OutlinedTextField(subject, { subject = it }, label = { Text("Subject") }, singleLine = true)
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                listOf("Lecture test", "Cumulative").forEach { type -> TextButton(onClick = { kind = type }) { Text(if (kind == type) "• $type" else type, color = ClassroomTeal, fontSize = 10.sp) } }
+            }
+            OutlinedTextField(dueDate, { dueDate = it }, label = { Text("Due date") }, singleLine = true)
+        } },
+        confirmButton = { TextButton(onClick = { if (title.isNotBlank() && subject.isNotBlank()) onSave(title, subject, kind, dueDate) }) { Text("Save changes", color = ClassroomTeal) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = ClassroomMuted) } }
+    )
+}
+
+@Composable
+private fun MockTestCard(test: MockTest, onStart: () -> Unit) {
+    Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(7.dp)).padding(15.dp)) {
+        Text(test.subject.uppercase(), color = ClassroomTeal, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+        Text(test.title, color = ClassroomInk, fontSize = 18.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
+        Text(test.description, color = ClassroomMuted, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp, bottom = 9.dp))
+        Text("${test.questions} questions  ·  No time limit", color = ClassroomMuted, fontSize = 10.sp, modifier = Modifier.padding(bottom = 9.dp))
+        PrimaryAction("Start mock test", onStart)
+    }
+}
+
+@Composable
+private fun MockQuestionCard(question: MockQuestion, selectedOption: Int?, onSelect: (Int) -> Unit) {
+    Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(7.dp)).padding(14.dp)) {
+        Text(question.prompt, color = ClassroomInk, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, lineHeight = 20.sp)
+        question.options.forEachIndexed { index, option ->
+            Surface(
+                onClick = { onSelect(index) },
+                color = if (selectedOption == index) Color(0xFFE5F0E5) else ClassroomPaper,
+                shape = RoundedCornerShape(5.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 7.dp)
+            ) {
+                Row(Modifier.padding(horizontal = 10.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(18.dp).background(if (selectedOption == index) ClassroomTeal else Color.White, CircleShape), contentAlignment = Alignment.Center) {
+                        if (selectedOption == index) Text("✓", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Text(option, color = ClassroomInk, fontSize = 12.sp, modifier = Modifier.padding(start = 9.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MockResultPanel(attempt: MockAttempt) {
+    Column(Modifier.fillMaxWidth().background(ClassroomInk, RoundedCornerShape(7.dp)).padding(17.dp)) {
+        Text(if (attempt.attemptNumber > 0) "ATTEMPT ${attempt.attemptNumber}" else "LATEST RESULT", color = ClassroomGreen, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+        Text("${attempt.score} / ${attempt.maxScore}", color = Color.White, fontSize = 29.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 5.dp))
+        Text("${attempt.maxScore - attempt.score} questions to practise", color = ClassroomGreen, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+    }
+}
+
+@Composable
+private fun MockAdvicePanel(advice: String) {
+    Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(7.dp)).padding(15.dp)) {
+        Text("YOUR LATEST AI ADVICE", color = ClassroomTeal, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+        Text(advice, color = ClassroomInk, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 7.dp))
     }
 }
 
@@ -568,6 +796,30 @@ private fun AdviceDialog(work: StudentWork, teacher: Boolean, onDismiss: () -> U
 private fun parseTests(array: JSONArray): List<PublishedTest> = (0 until array.length()).map { index ->
     val item = array.getJSONObject(index)
     PublishedTest(item.getString("id"), item.getString("title"), item.getString("subject"), item.getString("kind"), item.optString("due_date"), item.optInt("question_count"), item.optBoolean("has_paper"))
+}
+
+private fun parseMockTests(array: JSONArray): List<MockTest> = (0 until array.length()).map { index ->
+    val item = array.getJSONObject(index)
+    MockTest(item.getString("id"), item.getString("title"), item.getString("subject"), item.optString("description"), item.optInt("question_count"))
+}
+
+private fun parseMockQuestions(array: JSONArray): List<MockQuestion> = (0 until array.length()).map { index ->
+    val item = array.getJSONObject(index)
+    val options = item.getJSONArray("options")
+    MockQuestion(item.getString("id"), item.getString("prompt"), (0 until options.length()).map { options.getString(it) })
+}
+
+private fun parseLatestMockAttempt(response: JSONObject): MockAttempt? {
+    val item = response.optJSONObject("attempt") ?: return null
+    val answersJson = item.optJSONObject("answers") ?: JSONObject()
+    val answers = mutableMapOf<String, Int>()
+    val keys = answersJson.keys()
+    while (keys.hasNext()) {
+        val key = keys.next()
+        answers[key] = answersJson.optInt(key, -1)
+    }
+    val advice = item.optJSONObject("last_advice")?.optString("advice")?.takeIf(String::isNotBlank)
+    return MockAttempt(item.getString("id"), item.getString("test_id"), item.optDouble("score").toInt(), item.optDouble("max_score").toInt(), item.optInt("attempt_number"), answers, advice)
 }
 
 private fun parsePlans(array: JSONArray): List<WeeklyTarget> = (0 until array.length()).map { index ->
