@@ -200,7 +200,8 @@ private fun ClassroomApp(context: Context) {
                         preferences.edit().putString("backend_url", backendUrl.trim().trimEnd('/')).apply()
                         execute("Backend connection failed") {
                             val health = SmartclassApi(backendUrl).health()
-                            val aiStatus = if (health.optBoolean("ai_configured")) "Gemini key is configured." else "Backend is reachable, but no Gemini key is configured."
+                            val providerName = health.optString("provider", "AI provider").replaceFirstChar { it.uppercase() }
+                            val aiStatus = if (health.optBoolean("ai_configured")) "$providerName API key is configured." else "Backend is reachable, but no $providerName API key is configured."
                             activity.runOnUiThread { showError("Backend reachable", "The server responded successfully. $aiStatus") }
                         }
                     },

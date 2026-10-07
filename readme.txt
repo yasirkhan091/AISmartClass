@@ -2,14 +2,14 @@ AI Smartclass
 
 Native Android classroom app with backend-backed teacher/student portals.
 Teachers publish class tests with PDF question papers. Students in that class
-can open the paper, submit an answer-sheet PDF, and view Gemini scores and
+can open the paper, submit an answer-sheet PDF, and view AI scores and
 advice.
 
 Build the APK with:
 	./gradlew assembleDebug
 
 APK output:
-	AIClassroom_v0.6.apk
+	AIClassroom_v0.7.apk
 
 Release versions
 ----------------
@@ -22,9 +22,10 @@ Backend
 The FastAPI backend in backend/ stores users, classes, plans, test questions,
 rubrics, PDF submissions, evaluations, and AI-readable student profiles in
 SQLite. It sends the test paper, optional worked solution, and student's
-original PDF to Gemini from the server so handwriting is available and the
-API key stays off the phone.
-Keep your real key in backend/.env (ignored by Git), not backend/.env.example.
+original PDF to the configured AI provider from the server so handwriting is
+available and the API key stays off the phone. OpenAI uses the Responses API;
+Gemini remains supported. Keep real keys in backend/.env (ignored by Git), not
+backend/.env.example.
 
 The seeded demo accounts use a blank password; sign in with username only:
 	naruto and sasuke are students; kakashi is the teacher.
@@ -47,21 +48,21 @@ PowerShell as Administrator and forward port 8000 to WSL:
 	netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=8000 connectaddress=$WslIp connectport=8000
 	New-NetFirewallRule -DisplayName "AI Smartclass local backend" -Direction Inbound -Protocol TCP -LocalPort 8000 -RemoteAddress LocalSubnet -Action Allow
 On the phone login screen, enter `http://<windows-wifi-ip>:8000` and tap
-Test connection. The health check should report backend and Gemini-key status.
+Test connection. The health check reports backend and configured-provider status.
 
 Two seeded tests and sample student attempts are in backend/demo_papers/:
 `linear_equations.pdf`, `linear_equations_answers.pdf`, `polynomials.pdf`, and
 `polynomials_answers.pdf`. The separate `*_key.pdf` files are teacher-only
-grading references and are sent to Gemini with each submission. Copy an answer
+grading references and are sent to the configured provider with each submission. Copy an answer
 PDF to the phone, sign in as a student, open a test, and submit it. Backend and
 Android failures are logged to the backend console and Android Logcat (tag:
 AIClassroom); logs avoid PDF contents and API keys.
 
-Google AI Studio currently offers a limited free API tier for eligible models
-and regions. Create a key at https://aistudio.google.com/apikey and set it as
-GEMINI_API_KEY on the backend. Free-tier quotas and terms can change; Google
-may use free-tier prompts to improve its products. Test with dummy or
-redacted student work, not identifiable student records. Never put the key in
-the APK. This LAN setup uses unencrypted HTTP for development only; do not
-expose it publicly or use real student data until HTTPS and production access
-controls are added.
+Set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and `AI_MODEL=gpt-4.1-mini` in
+backend/.env for OpenAI, or select Gemini and set its server-side key. OpenAI
+API billing is separate from a ChatGPT subscription; add API credits in the
+OpenAI developer platform before grading. Never put provider keys in the APK.
+Test with dummy or redacted student work, not identifiable student records.
+This LAN setup uses unencrypted HTTP for development only; do not expose it
+publicly or use real student data until HTTPS and production access controls
+are added.

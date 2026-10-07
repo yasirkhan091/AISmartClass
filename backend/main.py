@@ -145,7 +145,12 @@ def test_payload(row):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "ai_configured": bool(os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY"))}
+    provider = os.getenv("AI_PROVIDER", "gemini").strip().lower()
+    if provider == "openai":
+        api_configured = bool(os.getenv("OPENAI_API_KEY") or os.getenv("AI_API_KEY"))
+    else:
+        api_configured = bool(os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY"))
+    return {"status": "ok", "ai_configured": api_configured, "provider": provider, "model": os.getenv("AI_MODEL", "")}
 
 
 @app.post("/api/login")
@@ -368,7 +373,95 @@ def download_answer_sheet(submission_id: str, user: dict = Depends(authenticated
     return FileResponse(row["pdf_path"], media_type="application/pdf", filename="answer-sheet.pdf")
 
 
+def get_openai_evaluation(prompt: str, answer_pdf_path: str, question_pdf_path: str, answer_key_path: str | None, api_key: str):
+    files = [("Teacher question paper", question_pdf_path)]
+    if answer_key_path and Path(answer_key_path).is_file():
+        files.append(("Teacher worked answer reference; use only to verify grading", answer_key_path))
+    files.append(("Student answer sheet to evaluate", answer_pdf_path))
+    parts = [{"type": "input_text", "text": "Grade the student's answer sheet against the teacher question paper. Use the rubric and student profile in the context. Inspect the PDF pages visually, including handwriting. Award partial credit fairly. Return a JSON object with numeric score and max_score, feedback as an array of specific mistakes and actionable improvements, and teacher_advice.\nContext: " + prompt}]
+    total_pdf_bytes = 0
+    for label, pdf_path in files:
+        pdf_bytes = Path(pdf_path).read_bytes()
+        total_pdf_bytes += len(pdf_bytes)
+        parts.append({"type": "input_text", "text": label})
+        parts.append({
+            "type": "input_file",
+            "filename": Path(pdf_path).name,
+            "file_data": "data:application/pdf;base64," + base64.b64encode(pdf_bytes).decode("ascii"),
+            "detail": "high",
+        })
+    if total_pdf_bytes > 50 * 1024 * 1024:
+        raise HTTPException(413, "Combined test paper, answer key, and answer sheet exceed OpenAI's 50 MB request limit")
+    model = os.getenv("AI_MODEL", "gpt-4.1-mini")
+    request_body = {
+        "model": model,
+        "instructions": "You are a careful school mathematics marker. Treat the teacher's answer key as private grading reference, never as student work. Do not invent unreadable answers. Return only the requested JSON.",
+        "input": [{"role": "user", "content": parts}],
+        "text": {"format": {"type": "json_object"}},
+        "temperature": 0.1,
+        "store": False,
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(request_body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=150) as response:
+            payload = json.loads(response.read())
+        text_parts = [
+            part["text"]
+            for item in payload.get("output", []) if item.get("type") == "message"
+            for part in item.get("content", []) if part.get("type") == "output_text" and part.get("text")
+        ]
+        content = "\n".join(text_parts) or payload.get("output_text", "")
+        result = json.loads(content)
+        if not isinstance(result.get("score"), (int, float)) or not isinstance(result.get("max_score"), (int, float)):
+            raise ValueError("OpenAI response is missing numeric score fields")
+        logger.info("OpenAI evaluation completed successfully using model %s", model)
+        return result
+    except urllib.error.HTTPError as error:
+        try:
+            provider_error = json.loads(error.read()).get("error", {})
+            provider_code = provider_error.get("code") or provider_error.get("type") or "unknown"
+            provider_message = provider_error.get("message", "No provider message")
+        except (json.JSONDecodeError, AttributeError):
+            provider_code = "unknown"
+            provider_message = "Provider returned a non-JSON error"
+        if api_key in provider_message:
+            provider_message = provider_message.replace(api_key, "[redacted]")
+        logger.error("OpenAI evaluation failed: HTTP %s, %s: %s", error.code, provider_code, provider_message)
+        if error.code == 429:
+            if provider_code in {"credit_balance_exhausted", "insufficient_quota"}:
+                raise HTTPException(402, "OpenAI API account has no credits. Add API billing credits at platform.openai.com, then retry this saved submission.") from error
+            raise HTTPException(429, "OpenAI API quota or rate limit reached. The submission is saved; check your API billing and usage, then retry.") from error
+        if error.code == 401:
+            raise HTTPException(503, "OpenAI rejected the configured API key. Check OPENAI_API_KEY in backend/.env and restart the backend.") from error
+        if error.code >= 500:
+            raise HTTPException(503, "OpenAI is temporarily unavailable. The submission is saved; retry the AI review later.") from error
+        raise HTTPException(502, "OpenAI request failed. Check the backend logs for provider details.") from error
+    except (urllib.error.URLError, TimeoutError) as error:
+        logger.error("OpenAI connection failed (%s)", type(error).__name__)
+        raise HTTPException(502, "Could not connect to OpenAI; check backend logs and network access") from error
+    except (KeyError, ValueError, json.JSONDecodeError) as error:
+        logger.error("OpenAI returned an unusable evaluation (%s)", type(error).__name__)
+        raise HTTPException(502, "OpenAI returned an unusable evaluation; check backend logs") from error
+    except OSError as error:
+        logger.error("Could not read evaluation PDF (%s)", type(error).__name__)
+        raise HTTPException(500, "An evaluation PDF could not be read; check backend logs") from error
+
+
 def get_ai_evaluation(prompt: str, answer_pdf_path: str, question_pdf_path: str, answer_key_path: str | None = None):
+    provider = os.getenv("AI_PROVIDER", "gemini").strip().lower()
+    if provider == "openai":
+        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("AI_API_KEY")
+        if not api_key:
+            logger.error("OpenAI evaluation requested but OPENAI_API_KEY is not configured")
+            raise HTTPException(503, "Set OPENAI_API_KEY in the backend environment to enable evaluation")
+        return get_openai_evaluation(prompt, answer_pdf_path, question_pdf_path, answer_key_path, api_key)
+    if provider != "gemini":
+        raise HTTPException(500, "AI_PROVIDER must be either openai or gemini")
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY")
     if not api_key:
         logger.error("AI evaluation requested but no Gemini API key is configured")
