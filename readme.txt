@@ -9,7 +9,7 @@ Build the APK with:
 	./gradlew assembleDebug
 
 APK output:
-	AIClassroom_v0.4.apk
+	AIClassroom_v0.5.apk
 
 Release versions
 ----------------
@@ -26,8 +26,10 @@ original PDF to Gemini from the server so handwriting is available and the
 API key stays off the phone.
 Keep your real key in backend/.env (ignored by Git), not backend/.env.example.
 
-The seeded demo accounts all use password yasir123123:
+The seeded demo accounts use a blank password; sign in with username only:
 	naruto and sasuke are students; kakashi is the teacher.
+This disables password protection for demo accounts. Only use on a private
+testing network; anyone who can reach the server can sign in as any demo user.
 
 On Ubuntu, install Python support if needed, then start the backend:
 	sudo apt update && sudo apt install python3-venv python3-pip

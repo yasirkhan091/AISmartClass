@@ -65,7 +65,7 @@ initialize()
 logger.info("Smartclass database initialized")
 
 
-DEMO_PASSWORD = "yasir123123"
+DEMO_PASSWORD = ""
 CLASS_ID = "class9-algebra"
 
 
