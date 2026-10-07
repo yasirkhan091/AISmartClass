@@ -9,7 +9,7 @@ Build the APK with:
 	./gradlew assembleDebug
 
 APK output:
-	AIClassroom_v0.1.apk
+	AIClassroom_v0.2.apk
 
 Release versions
 ----------------
@@ -23,15 +23,24 @@ The FastAPI backend in backend/ stores users, classes, plans, test questions,
 rubrics, PDF submissions, evaluations, and AI-readable student profiles in
 SQLite. It sends the original student PDF to Gemini from the server, so visual
 handwriting is available to the model and the API key stays off the phone.
-Configure GEMINI_API_KEY on the backend only, then start it with:
+Keep your real key in backend/.env (ignored by Git), not backend/.env.example.
+To start a local backend on Linux:
 	cd backend
 	python -m venv .venv && . .venv/bin/activate
 	pip install -r requirements.txt
+	set -a && . ./.env && set +a
 	uvicorn main:app --host 0.0.0.0 --port 8000
 
-API documentation is served at /docs. Backend and Android failures are logged
-to the backend console and Android Logcat (tag: AIClassroom); logs avoid PDF
-contents and API keys.
+The laptop and phone must be on the same Wi-Fi. Open http://<laptop-lan-ip>:8000/docs
+on the laptop to exercise login, class, test, PDF submission, and evaluation
+endpoints. Check /api/health for backend status. Allow inbound TCP port 8000
+through the laptop firewall if needed.
+
+The APK currently runs in offline demo mode: creating targets/tests and choosing
+a student PDF are local-only actions. It does not yet call this backend, so AI
+grading can be tested through /docs but not from the phone app yet. Backend and
+Android failures are logged to the backend console and Android Logcat (tag:
+AIClassroom); logs avoid PDF contents and API keys.
 
 Google AI Studio currently offers a limited free API tier for eligible models
 and regions. Create a key at https://aistudio.google.com/apikey and set it as

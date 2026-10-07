@@ -88,6 +88,7 @@ private fun SmartclassApp(context: Context) {
     var showTestDialog by remember { mutableStateOf(false) }
     var showPlanDialog by remember { mutableStateOf(false) }
     var uploadTest by remember { mutableStateOf<ClassTest?>(null) }
+    var errorTitle by remember { mutableStateOf("Something went wrong") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     val pdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -110,6 +111,7 @@ private fun SmartclassApp(context: Context) {
                 uploadTest = null
             } catch (exception: Exception) {
                 Log.e(LogTag, "Could not process the selected answer-sheet PDF", exception)
+                errorTitle = "PDF selection failed"
                 errorMessage = "The PDF could not be saved. Please choose the file again."
             }
         }
@@ -120,6 +122,7 @@ private fun SmartclassApp(context: Context) {
             pdfPicker.launch(arrayOf("application/pdf"))
         } catch (exception: Exception) {
             Log.e(LogTag, "Could not open the PDF picker", exception)
+            errorTitle = "PDF selection failed"
             errorMessage = "The PDF picker could not be opened. Please try again."
         }
     }
@@ -211,23 +214,37 @@ private fun SmartclassApp(context: Context) {
     if (showTestDialog) CreateTestDialog(
         onDismiss = { showTestDialog = false },
         onCreate = { title, subject, kind, date, questions ->
-            tests.add(0, ClassTest(title, subject, kind, date, questions))
-            saveTests(prefs, tests)
-            showTestDialog = false
+            try {
+                tests.add(0, ClassTest(title, subject, kind, date, questions))
+                saveTests(prefs, tests)
+                Log.i(LogTag, "Test saved locally")
+                showTestDialog = false
+            } catch (exception: Exception) {
+                Log.e(LogTag, "Could not save test", exception)
+                errorTitle = "Couldn't save test"
+                errorMessage = "The test could not be saved on this device. Please try again."
+            }
         }
     )
     if (showPlanDialog) CreatePlanDialog(
         onDismiss = { showPlanDialog = false },
         onCreate = { title, detail ->
-            plans.add(0, StudyPlan(title, detail, "WEEK 04"))
-            savePlans(prefs, plans)
-            showPlanDialog = false
+            try {
+                plans.add(0, StudyPlan(title, detail, "WEEK 04"))
+                savePlans(prefs, plans)
+                Log.i(LogTag, "Weekly target saved locally")
+                showPlanDialog = false
+            } catch (exception: Exception) {
+                Log.e(LogTag, "Could not save weekly target", exception)
+                errorTitle = "Couldn't save target"
+                errorMessage = "The weekly target could not be saved on this device. Please try again."
+            }
         }
     )
     errorMessage?.let { message ->
         AlertDialog(
             onDismissRequest = { errorMessage = null },
-            title = { Text("PDF selection failed", color = Ink) },
+            title = { Text(errorTitle, color = Ink) },
             text = { Text(message, color = Muted) },
             confirmButton = { TextButton(onClick = { errorMessage = null }) { Text("OK", color = Teal) } }
         )
