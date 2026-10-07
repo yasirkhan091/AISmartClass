@@ -1,0 +1,8 @@
+.gradle/
+**/build/
+backend/.venv/
+backend/__pycache__/
+backend/*.db
+backend/uploads/
+.env
+backend/.env
