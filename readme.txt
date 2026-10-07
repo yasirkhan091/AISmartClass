@@ -9,7 +9,7 @@ Build the APK with:
 	./gradlew assembleDebug
 
 APK output:
-	AIClassroom_v0.5.apk
+	AIClassroom_v0.6.apk
 
 Release versions
 ----------------

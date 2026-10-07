@@ -373,7 +373,7 @@ def get_ai_evaluation(prompt: str, answer_pdf_path: str, question_pdf_path: str,
     if not api_key:
         logger.error("AI evaluation requested but no Gemini API key is configured")
         raise HTTPException(503, "Set GEMINI_API_KEY on the backend to enable evaluation")
-    model = os.getenv("AI_MODEL", "gemini-2.5-flash")
+    model = os.getenv("AI_MODEL", "gemini-3.8-flash")
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model, safe='-_.')}:generateContent"
     with open(question_pdf_path, "rb") as pdf_file:
         question_pdf_data = base64.b64encode(pdf_file.read()).decode("ascii")
@@ -409,7 +409,20 @@ def get_ai_evaluation(prompt: str, answer_pdf_path: str, question_pdf_path: str,
             raise ValueError("AI response is missing numeric score fields")
         return result
     except urllib.error.HTTPError as error:
-        logger.error("Gemini evaluation failed with HTTP status %s", error.code)
+        try:
+            provider_error = json.loads(error.read()).get("error", {})
+            provider_status = provider_error.get("status", "unknown")
+            provider_message = provider_error.get("message", "No provider message")
+        except (json.JSONDecodeError, AttributeError):
+            provider_status = "unknown"
+            provider_message = "Provider returned a non-JSON error"
+        if api_key in provider_message:
+            provider_message = provider_message.replace(api_key, "[redacted]")
+        logger.error("Gemini evaluation failed: HTTP %s, %s: %s", error.code, provider_status, provider_message)
+        if error.code == 503:
+            raise HTTPException(503, "Gemini is temporarily overloaded. Your submission is saved; retry the AI review in a little while.") from error
+        if error.code == 429:
+            raise HTTPException(429, "Gemini's rate limit or free-tier quota was reached. Your submission is saved; check AI Studio usage and retry later.") from error
         raise HTTPException(502, "Gemini request failed; check backend logs and model/key configuration") from error
     except (urllib.error.URLError, TimeoutError) as error:
         logger.error("Gemini connection failed (%s)", type(error).__name__)
