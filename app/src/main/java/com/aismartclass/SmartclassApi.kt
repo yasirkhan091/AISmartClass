@@ -11,7 +11,11 @@ import java.net.URL
 private class SmartclassHttpException(message: String) : IOException(message)
 
 internal class SmartclassApi(baseUrl: String, private val token: String? = null) {
-    private val baseUrl = baseUrl.trim().trimEnd('/')
+    private val baseUrl = baseUrl.trim().trimEnd('/').let { address ->
+        if (address.startsWith("http://") || address.startsWith("https://")) address else "http://$address"
+    }
+
+    fun health(): JSONObject = JSONObject(String(requestBytes("/api/health", "GET", null, null), Charsets.UTF_8))
 
     fun login(username: String, password: String): JSONObject = requestJson(
         "/api/login",

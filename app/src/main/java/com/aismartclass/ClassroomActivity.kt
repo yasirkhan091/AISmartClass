@@ -198,6 +198,14 @@ private fun ClassroomApp(context: Context) {
                     backendUrl = backendUrl,
                     onBackendUrlChange = { backendUrl = it },
                     loading = loading,
+                    onPing = {
+                        preferences.edit().putString("backend_url", backendUrl.trim().trimEnd('/')).apply()
+                        execute("Backend connection failed") {
+                            val health = SmartclassApi(backendUrl).health()
+                            val aiStatus = if (health.optBoolean("ai_configured")) "Gemini key is configured." else "Backend is reachable, but no Gemini key is configured."
+                            activity.runOnUiThread { showError("Backend reachable", "The server responded successfully. $aiStatus") }
+                        }
+                    },
                     onLogin = { username, password ->
                         preferences.edit().putString("backend_url", backendUrl.trim().trimEnd('/')).apply()
                         execute("Sign-in failed") {
@@ -300,7 +308,7 @@ private fun ClassroomApp(context: Context) {
 }
 
 @Composable
-private fun LoginScreen(backendUrl: String, onBackendUrlChange: (String) -> Unit, loading: Boolean, onLogin: (String, String) -> Unit) {
+private fun LoginScreen(backendUrl: String, onBackendUrlChange: (String) -> Unit, loading: Boolean, onPing: () -> Unit, onLogin: (String, String) -> Unit) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(horizontal = 26.dp), verticalArrangement = Arrangement.Center) {
@@ -311,8 +319,13 @@ private fun LoginScreen(backendUrl: String, onBackendUrlChange: (String) -> Unit
         OutlinedTextField(password, { password = it }, label = { Text("Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
         OutlinedTextField(backendUrl, onBackendUrlChange, label = { Text("Backend address") }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
         Text("On your phone, use your computer's Wi-Fi IP (for example, http://192.168.1.20:8000). Demo password: yasir123123", color = ClassroomMuted, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 9.dp))
-        Button(onClick = { onLogin(username.trim(), password) }, enabled = !loading && username.isNotBlank() && password.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = ClassroomTeal), shape = RoundedCornerShape(5.dp), modifier = Modifier.fillMaxWidth().padding(top = 18.dp)) {
-            if (loading) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Sign in", color = Color.White)
+        Row(Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onLogin(username.trim(), password) }, enabled = !loading && username.isNotBlank() && password.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = ClassroomTeal), shape = RoundedCornerShape(5.dp), modifier = Modifier.weight(1f)) {
+                if (loading) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Sign in", color = Color.White)
+            }
+            OutlinedButton(onClick = onPing, enabled = !loading && backendUrl.isNotBlank(), shape = RoundedCornerShape(5.dp), modifier = Modifier.weight(1f)) {
+                Text("Test connection", color = ClassroomTeal, fontSize = 12.sp)
+            }
         }
         Text("Student: naruto or sasuke     Teacher: kakashi", color = ClassroomMuted, fontSize = 11.sp, modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 15.dp))
     }

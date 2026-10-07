@@ -9,7 +9,7 @@ Build the APK with:
 	./gradlew assembleDebug
 
 APK output:
-	AIClassroom_v0.3.apk
+	AIClassroom_v0.4.apk
 
 Release versions
 ----------------
@@ -38,11 +38,14 @@ On Ubuntu, install Python support if needed, then start the backend:
 	set -a && . ./.env && set +a
 	uvicorn main:app --host 0.0.0.0 --port 8000
 
-The laptop and phone must be on the same Wi-Fi. Find the laptop's LAN address
-with `hostname -I`. On the phone login screen, enter
-`http://<laptop-lan-ip>:8000` as Backend address, then sign in. Check
-`http://<laptop-lan-ip>:8000/api/health` from the phone browser. Allow inbound
-TCP port 8000 through the laptop firewall if needed.
+The laptop and phone must be on the same Wi-Fi. On Windows, get the laptop's
+Wi-Fi IPv4 address with `ipconfig`. If the backend runs in WSL2 NAT mode, open
+PowerShell as Administrator and forward port 8000 to WSL:
+	$WslIp = (wsl hostname -I).Trim().Split(' ')[0]
+	netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=8000 connectaddress=$WslIp connectport=8000
+	New-NetFirewallRule -DisplayName "AI Smartclass local backend" -Direction Inbound -Protocol TCP -LocalPort 8000 -RemoteAddress LocalSubnet -Action Allow
+On the phone login screen, enter `http://<windows-wifi-ip>:8000` and tap
+Test connection. The health check should report backend and Gemini-key status.
 
 Two seeded tests and sample student attempts are in backend/demo_papers/:
 `linear_equations.pdf`, `linear_equations_answers.pdf`, `polynomials.pdf`, and
