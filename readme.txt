@@ -9,7 +9,7 @@ Build the APK with:
 	./gradlew assembleDebug
 
 APK output:
-	AIClassroom_v0.7.apk
+	AIClassroom_v0.8.apk
 
 Release versions
 ----------------
@@ -58,10 +58,12 @@ PDF to the phone, sign in as a student, open a test, and submit it. Backend and
 Android failures are logged to the backend console and Android Logcat (tag:
 AIClassroom); logs avoid PDF contents and API keys.
 
-Set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and `AI_MODEL=gpt-4.1-mini` in
-backend/.env for OpenAI, or select Gemini and set its server-side key. OpenAI
-API billing is separate from a ChatGPT subscription; add API credits in the
-OpenAI developer platform before grading. Never put provider keys in the APK.
+Set `AI_PROVIDER=gemini` to use Gemini only, `AI_PROVIDER=openai` to use OpenAI
+only, or `AI_PROVIDER=auto` to try Gemini first and then OpenAI if Gemini fails.
+Use `GEMINI_API_KEY` with `GEMINI_MODEL=gemini-3.8-flash`, and/or
+`OPENAI_API_KEY` with `OPENAI_MODEL=gpt-4.1-mini`. Auto fallback may incur
+OpenAI API charges. OpenAI API billing is separate from ChatGPT subscriptions.
+Never put provider keys in the APK.
 Test with dummy or redacted student work, not identifiable student records.
 This LAN setup uses unencrypted HTTP for development only; do not expose it
 publicly or use real student data until HTTPS and production access controls

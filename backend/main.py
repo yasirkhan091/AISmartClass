@@ -143,14 +143,33 @@ def test_payload(row):
     return {"id": row["id"], "class_id": row["class_id"], "title": row["title"], "subject": row["subject"], "kind": row["kind"], "due_date": row["due_date"], "question_count": row["question_count"], "has_paper": bool(row["paper_path"])}
 
 
+def configured_provider() -> str:
+    provider = os.getenv("AI_PROVIDER", "auto").strip().lower()
+    if provider != "auto":
+        return provider
+    if os.getenv("GEMINI_API_KEY"):
+        return "gemini"
+    if os.getenv("OPENAI_API_KEY"):
+        return "openai"
+    return "gemini"
+
+
+def model_for_provider(provider: str) -> str:
+    if provider == "openai":
+        return os.getenv("OPENAI_MODEL") or (os.getenv("AI_MODEL") if os.getenv("AI_MODEL", "").startswith(("gpt-", "o")) else None) or "gpt-4.1-mini"
+    return os.getenv("GEMINI_MODEL") or (os.getenv("AI_MODEL") if os.getenv("AI_MODEL", "").startswith("gemini-") else None) or "gemini-3.8-flash"
+
+
 @app.get("/api/health")
 def health():
-    provider = os.getenv("AI_PROVIDER", "gemini").strip().lower()
+    provider = configured_provider()
     if provider == "openai":
         api_configured = bool(os.getenv("OPENAI_API_KEY") or os.getenv("AI_API_KEY"))
-    else:
+    elif provider == "gemini":
         api_configured = bool(os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY"))
-    return {"status": "ok", "ai_configured": api_configured, "provider": provider, "model": os.getenv("AI_MODEL", "")}
+    else:
+        api_configured = False
+    return {"status": "ok", "ai_configured": api_configured, "provider": provider, "model": model_for_provider(provider)}
 
 
 @app.post("/api/login")
@@ -392,7 +411,7 @@ def get_openai_evaluation(prompt: str, answer_pdf_path: str, question_pdf_path: 
         })
     if total_pdf_bytes > 50 * 1024 * 1024:
         raise HTTPException(413, "Combined test paper, answer key, and answer sheet exceed OpenAI's 50 MB request limit")
-    model = os.getenv("AI_MODEL", "gpt-4.1-mini")
+    model = model_for_provider("openai")
     request_body = {
         "model": model,
         "instructions": "You are a careful school mathematics marker. Treat the teacher's answer key as private grading reference, never as student work. Do not invent unreadable answers. Return only the requested JSON.",
@@ -453,20 +472,42 @@ def get_openai_evaluation(prompt: str, answer_pdf_path: str, question_pdf_path: 
 
 
 def get_ai_evaluation(prompt: str, answer_pdf_path: str, question_pdf_path: str, answer_key_path: str | None = None):
-    provider = os.getenv("AI_PROVIDER", "gemini").strip().lower()
-    if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("AI_API_KEY")
-        if not api_key:
-            logger.error("OpenAI evaluation requested but OPENAI_API_KEY is not configured")
-            raise HTTPException(503, "Set OPENAI_API_KEY in the backend environment to enable evaluation")
-        return get_openai_evaluation(prompt, answer_pdf_path, question_pdf_path, answer_key_path, api_key)
-    if provider != "gemini":
-        raise HTTPException(500, "AI_PROVIDER must be either openai or gemini")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY")
-    if not api_key:
-        logger.error("AI evaluation requested but no Gemini API key is configured")
-        raise HTTPException(503, "Set GEMINI_API_KEY on the backend to enable evaluation")
-    model = os.getenv("AI_MODEL", "gemini-3.8-flash")
+    requested_provider = os.getenv("AI_PROVIDER", "auto").strip().lower()
+    if requested_provider not in {"auto", "openai", "gemini"}:
+        raise HTTPException(500, "AI_PROVIDER must be auto, openai, or gemini")
+    if requested_provider == "auto":
+        providers = [provider for provider, key in (("gemini", os.getenv("GEMINI_API_KEY")), ("openai", os.getenv("OPENAI_API_KEY"))) if key]
+    else:
+        providers = [requested_provider]
+    if not providers:
+        raise HTTPException(503, "Configure GEMINI_API_KEY or OPENAI_API_KEY in backend/.env")
+    failures = []
+    for provider in providers:
+        try:
+            if provider == "openai":
+                api_key = os.getenv("OPENAI_API_KEY") or (os.getenv("AI_API_KEY") if requested_provider == "openai" else None)
+                if not api_key:
+                    raise HTTPException(503, "Set OPENAI_API_KEY in the backend environment to enable evaluation")
+                return get_openai_evaluation(prompt, answer_pdf_path, question_pdf_path, answer_key_path, api_key)
+            api_key = os.getenv("GEMINI_API_KEY") or (os.getenv("AI_API_KEY") if requested_provider == "gemini" else None)
+            if not api_key:
+                raise HTTPException(503, "Set GEMINI_API_KEY on the backend to enable evaluation")
+            return get_gemini_evaluation(prompt, answer_pdf_path, question_pdf_path, answer_key_path, api_key)
+        except HTTPException as error:
+            failures.append((provider, error))
+            if provider != providers[-1] and error.status_code in {401, 402, 429, 500, 502, 503}:
+                logger.warning("%s unavailable (HTTP %s); auto mode will try the next configured provider", provider, error.status_code)
+                continue
+            if requested_provider != "auto":
+                raise
+    if len(failures) == 1:
+        raise failures[0][1]
+    summary = "; ".join(f"{provider}: {error.detail}" for provider, error in failures)
+    raise HTTPException(failures[-1][1].status_code, f"All configured AI providers failed. {summary}")
+
+
+def get_gemini_evaluation(prompt: str, answer_pdf_path: str, question_pdf_path: str, answer_key_path: str | None, api_key: str):
+    model = model_for_provider("gemini")
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model, safe='-_.')}:generateContent"
     with open(question_pdf_path, "rb") as pdf_file:
         question_pdf_data = base64.b64encode(pdf_file.read()).decode("ascii")
