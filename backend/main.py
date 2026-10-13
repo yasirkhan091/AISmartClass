@@ -123,7 +123,7 @@ def initialize():
         CREATE TABLE IF NOT EXISTS evaluations(id TEXT PRIMARY KEY, submission_id TEXT UNIQUE REFERENCES submissions(id), score REAL NOT NULL, max_score REAL NOT NULL, feedback_json TEXT NOT NULL, teacher_advice TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS profiles(student_id TEXT PRIMARY KEY REFERENCES users(id), context_json TEXT NOT NULL DEFAULT '{}');
         CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS pdf_files(id TEXT PRIMARY KEY, content BLOB NOT NULL);
+        CREATE TABLE IF NOT EXISTS pdf_files(id TEXT PRIMARY KEY, content BYTEA NOT NULL);
         CREATE TABLE IF NOT EXISTS mock_tests(id TEXT PRIMARY KEY, class_id TEXT NOT NULL REFERENCES classes(id), title TEXT NOT NULL, subject TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS mock_questions(id TEXT PRIMARY KEY, test_id TEXT NOT NULL REFERENCES mock_tests(id), prompt TEXT NOT NULL, options_json TEXT NOT NULL, correct_index INTEGER NOT NULL, explanation TEXT NOT NULL, topic TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS mock_attempts(id TEXT PRIMARY KEY, test_id TEXT NOT NULL REFERENCES mock_tests(id), student_id TEXT NOT NULL REFERENCES users(id), answers_json TEXT NOT NULL, score REAL NOT NULL, max_score REAL NOT NULL, submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
