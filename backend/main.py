@@ -100,7 +100,11 @@ def connect():
         import psycopg
         from psycopg.rows import dict_row
 
-        return PostgresConnection(psycopg.connect(DATABASE_URL, row_factory=dict_row))
+        parsed_url = urllib.parse.urlsplit(DATABASE_URL)
+        query = urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
+        query = [(key, value) for key, value in query if key.lower() != "channel_binding"]
+        database_url = urllib.parse.urlunsplit(parsed_url._replace(query=urllib.parse.urlencode(query)))
+        return PostgresConnection(psycopg.connect(database_url, row_factory=dict_row))
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
