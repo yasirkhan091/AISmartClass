@@ -35,10 +35,11 @@ incur charges independently of hosting. Keep local keys in backend/.env
 
 The seeded demo accounts are IsraKhan (student) and YasirKhan (teacher).
 Usernames are case-insensitive. Local development defaults to blank passwords.
-Production requires separate DEMO_STUDENT_PASSWORD and DEMO_TEACHER_PASSWORD
-values of at least 16 characters; never commit them. All students currently
-share the student account, so this demo account scheme is only suitable for a
-controlled pilot, not real student records.
+Production requires separate, non-empty DEMO_STUDENT_PASSWORD and
+DEMO_TEACHER_PASSWORD values of at least 10 characters; longer passwords are
+recommended and must never be committed. All students currently share the
+student account, so this demo account scheme is only suitable for a controlled
+pilot, not real student records.
 
 On Ubuntu, install Python support if needed, then start the backend locally:
 	sudo apt update && sudo apt install python3-venv python3-pip

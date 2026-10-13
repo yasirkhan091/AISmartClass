@@ -38,8 +38,8 @@ if not DEMO_STUDENT_USERNAME or not DEMO_TEACHER_USERNAME or DEMO_STUDENT_USERNA
 if APP_ENV == "production":
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is required when APP_ENV=production")
-    if min(len(DEMO_STUDENT_PASSWORD), len(DEMO_TEACHER_PASSWORD)) < 16:
-        raise RuntimeError("Set separate 16-character DEMO_STUDENT_PASSWORD and DEMO_TEACHER_PASSWORD values in production")
+    if min(len(DEMO_STUDENT_PASSWORD), len(DEMO_TEACHER_PASSWORD)) < 10:
+        raise RuntimeError("Set separate DEMO_STUDENT_PASSWORD and DEMO_TEACHER_PASSWORD values of at least 10 characters in production")
     if DEMO_STUDENT_PASSWORD == DEMO_TEACHER_PASSWORD:
         raise RuntimeError("Student and teacher demo passwords must be different")
 DB_PATH = Path(os.getenv("SMARTCLASS_DB", ROOT / "smartclass.db"))
