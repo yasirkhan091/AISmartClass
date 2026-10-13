@@ -1,0 +1,85 @@
+AI SMARTCLASS - PROJECT HANDOFF
+Updated: 2026-10-13
+
+PROJECT
+-------
+Repository: https://github.com/yasirkhan091/AISmartClass
+Branch: master
+Render API: https://ais-smartclass-api.onrender.com
+Health endpoint: https://ais-smartclass-api.onrender.com/api/health
+Render service: ais-smartclass-api (free Python web service)
+Database: Neon PostgreSQL, project "AI smart Class", production branch
+Latest verified source commit at handoff start: e2993c2
+
+PURPOSE AND FUNCTION
+--------------------
+AI Smartclass is a native Android classroom app with student and teacher
+portals. Teachers publish tests and question-paper PDFs. Students upload
+answer-sheet PDFs, receive AI grading/advice, and can take an algebra MCQ
+practice test. The backend also stores classes, plans, rubrics, sessions,
+evaluations, and student profiles.
+
+TECH STACK
+----------
+Frontend: Kotlin, Android SDK, Jetpack Compose, Material 3.
+Backend: Python, FastAPI, Uvicorn, JSON REST endpoints, multipart PDF uploads.
+Local database: SQLite. Production database: PostgreSQL via psycopg.
+PDF persistence: PDF bytes are stored in PostgreSQL so Render restarts do not
+lose uploads. AI providers: OpenAI Responses API and Google Gemini, called only
+from the backend so provider keys are not shipped in the APK.
+Hosting: Render free web service; Neon PostgreSQL is hosted separately.
+
+DEPLOYMENT AND MOBILE APP
+-------------------------
+The root render.yaml defines the backend service with rootDir=backend and
+automatic Blueprint sync/deploys on commits to master. The Android app is in
+the same repository but Render does not build or deploy it. The API URL is the
+default in new APK builds; the app also saves a per-device backend URL override.
+Render's free service may spin down while idle, so its first request can be slow.
+
+Build the installable debug APK from the repository root:
+    ./gradlew assembleDebug
+
+Output:
+    AIClassroom_v0.9.apk
+
+Install the APK on a phone, sign in using the class account usernames below,
+and test connection to the Render API. The Render health response last verified
+as status=ok, AI configured, provider=openai, model=gpt-4.1-mini. The health
+endpoint also probes PostgreSQL.
+
+ACCOUNTS AND SECRETS
+--------------------
+Seeded usernames are IsraKhan (student) and YasirKhan (teacher); login ignores
+username capitalization. Their passwords are Render environment secrets and
+must not be stored in this file, source code, APK, or public Git history.
+Production requires separate passwords of at least 10 characters; longer
+passwords are recommended. All students currently share one account, so this is
+for a controlled pilot only, not real student data.
+
+backend/.env and render-secrets.txt are ignored by Git. Keep DATABASE_URL,
+OPENAI_API_KEY, GEMINI_API_KEY, and both account passwords in private local or
+hosting settings only. A Gemini key may have been exposed in a browser snapshot
+during setup; rotate it before using Gemini again. OpenAI is the verified
+provider in the hosted health response.
+
+LOCAL BACKEND DEVELOPMENT
+-------------------------
+From backend/, create/activate a virtual environment, install requirements,
+and keep local values in the ignored backend/.env. Then run:
+    uvicorn main:app --host 0.0.0.0 --port 8000
+
+Local development uses SQLite by default. Set DATABASE_URL to use PostgreSQL.
+For LAN phone testing, enter the development machine's reachable address in the
+app. Local HTTP is for development only; hosted phones should use the HTTPS
+Render URL.
+
+RESTARTING THIS TASK
+--------------------
+1. Run git pull origin master.
+2. Read this file and readme.txt before changing deployment or auth settings.
+3. Never display, commit, or paste secret values into chat or public files.
+4. Build with ./gradlew assembleDebug and verify /api/health after backend
+   changes. Render redeploys backend changes pushed to master.
+5. Keep student work synthetic or redacted until individual accounts, privacy
+   controls, and a retention policy are implemented.
