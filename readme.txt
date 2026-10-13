@@ -17,22 +17,30 @@ For each release, increment versionName and versionCode in
 app/build.gradle.kts. The APK filename uses versionName; commit the source and
 APK together so each release can be restored with Git.
 
-Backend
--------
-The FastAPI backend in backend/ stores users, classes, plans, test questions,
-rubrics, PDF submissions, evaluations, and AI-readable student profiles in
-SQLite. It sends the test paper, optional worked solution, and student's
-original PDF to the configured AI provider from the server so handwriting is
-available and the API key stays off the phone. OpenAI uses the Responses API;
-Gemini remains supported. Keep real keys in backend/.env (ignored by Git), not
-backend/.env.example.
+Backend and tech stack
+----------------------
+The Android client is a native Kotlin app using Jetpack Compose and Material 3.
+It communicates with the Python FastAPI backend over HTTPS using JSON REST
+endpoints and multipart PDF uploads. The backend stores users, classes, plans,
+tests, submissions, evaluations, sessions, profiles, and PDFs in a relational
+database. Local development defaults to SQLite. Production uses PostgreSQL
+through psycopg, configured with DATABASE_URL. PDF bytes live in the database,
+so they survive Render restarts without a paid persistent disk.
 
-The seeded demo accounts use a blank password; sign in with username only:
-	naruto and sasuke are students; kakashi is the teacher.
-This disables password protection for demo accounts. Only use on a private
-testing network; anyone who can reach the server can sign in as any demo user.
+For grading and feedback, the backend sends the original PDFs to Google Gemini
+or OpenAI from the server. Provider API keys never belong in the APK. OpenAI
+uses its Responses API; Gemini remains supported. AI provider API usage may
+incur charges independently of hosting. Keep local keys in backend/.env
+(ignored by Git), not backend/.env.example.
 
-On Ubuntu, install Python support if needed, then start the backend:
+The seeded demo accounts are IsraKhan (student) and YasirKhan (teacher).
+Usernames are case-insensitive. Local development defaults to blank passwords.
+Production requires separate DEMO_STUDENT_PASSWORD and DEMO_TEACHER_PASSWORD
+values of at least 16 characters; never commit them. All students currently
+share the student account, so this demo account scheme is only suitable for a
+controlled pilot, not real student records.
+
+On Ubuntu, install Python support if needed, then start the backend locally:
 	sudo apt update && sudo apt install python3-venv python3-pip
 	cd backend
 	python3 generate_demo_pdfs.py
@@ -49,6 +57,28 @@ PowerShell as Administrator and forward port 8000 to WSL:
 	New-NetFirewallRule -DisplayName "AI Smartclass local backend" -Direction Inbound -Protocol TCP -LocalPort 8000 -RemoteAddress LocalSubnet -Action Allow
 On the phone login screen, enter `http://<windows-wifi-ip>:8000` and tap
 Test connection. The health check reports backend and configured-provider status.
+
+Hosted deployment
+-----------------
+The root render.yaml defines a free Render Python web service with automatic
+deploys for commits to master. Render's free web filesystem is ephemeral, so
+production must use an external PostgreSQL database. Create a free PostgreSQL
+database with a provider such as Neon, then create a Render Blueprint from this
+GitHub repository and set DATABASE_URL, DEMO_STUDENT_PASSWORD, and
+DEMO_TEACHER_PASSWORD as private Render environment values. DATABASE_URL must be
+the provider's TLS-enabled connection string. Add the chosen AI provider key
+there too if AI grading/advice is required. Keep every secret out of Git.
+
+After Render reports the service live, copy its HTTPS address into the
+Backend address field on each phone and tap Test connection. Render free web
+services can sleep while idle, so the first request after inactivity may take
+longer. Build the APK with `./gradlew assembleDebug`; the current Android app
+persists the backend address on each device.
+
+GitHub CLI can create/push the repository, but it is not installed in every
+environment. The GitHub and Render dashboards can also be used for account
+authorization and initial setup; Render then deploys automatically on each
+commit to master.
 
 Two seeded tests and sample student attempts are in backend/demo_papers/:
 `linear_equations.pdf`, `linear_equations_answers.pdf`, `polynomials.pdf`, and
@@ -72,6 +102,7 @@ Use `GEMINI_API_KEY` with `GEMINI_MODEL=gemini-3.8-flash`, and/or
 OpenAI API charges. OpenAI API billing is separate from ChatGPT subscriptions.
 Never put provider keys in the APK.
 Test with dummy or redacted student work, not identifiable student records.
-This LAN setup uses unencrypted HTTP for development only; do not expose it
-publicly or use real student data until HTTPS and production access controls
-are added.
+Local LAN development uses unencrypted HTTP. Hosted access must use the Render
+HTTPS URL. Demo usernames are public by design, so share passwords privately
+and avoid real or identifiable student records until individual user accounts,
+appropriate privacy controls, and a retention policy are in place.

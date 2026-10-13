@@ -3,6 +3,10 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val defaultBackendUrl = providers.gradleProperty("SMARTCLASS_API_URL")
+    .orElse("https://ais-smartclass-api.onrender.com")
+    .get()
+
 android {
     namespace = "com.aismartclass"
     compileSdk = 34
@@ -13,10 +17,12 @@ android {
         targetSdk = 34
         versionCode = 10
         versionName = "0.9"
+        buildConfigField("String", "DEFAULT_BACKEND_URL", "\"$defaultBackendUrl\"")
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {

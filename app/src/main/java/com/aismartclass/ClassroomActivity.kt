@@ -49,6 +49,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -88,7 +90,7 @@ private fun ClassroomApp(context: Context) {
     val activity = context as ComponentActivity
     val preferences = remember { context.getSharedPreferences("smartclass", Context.MODE_PRIVATE) }
     val executor = remember { Executors.newSingleThreadExecutor() }
-    var backendUrl by remember { mutableStateOf(preferences.getString("backend_url", "http://10.0.2.2:8000") ?: "http://10.0.2.2:8000") }
+    var backendUrl by remember { mutableStateOf(preferences.getString("backend_url", BuildConfig.DEFAULT_BACKEND_URL) ?: BuildConfig.DEFAULT_BACKEND_URL) }
     var session by remember { mutableStateOf<LoggedInUser?>(null) }
     var loading by remember { mutableStateOf(false) }
     var errorTitle by remember { mutableStateOf("Something went wrong") }
@@ -236,10 +238,10 @@ private fun ClassroomApp(context: Context) {
                             activity.runOnUiThread { showError("Backend reachable", "The server responded successfully. $aiStatus") }
                         }
                     },
-                    onLogin = { username ->
+                    onLogin = { username, password ->
                         preferences.edit().putString("backend_url", backendUrl.trim().trimEnd('/')).apply()
                         execute("Sign-in failed") {
-                            val response = SmartclassApi(backendUrl).login(username, "")
+                            val response = SmartclassApi(backendUrl).login(username, password)
                             val userJson = response.getJSONObject("user")
                             val classJson = response.getJSONObject("class")
                             val loggedIn = LoggedInUser(
@@ -404,24 +406,26 @@ private fun ClassroomApp(context: Context) {
 private fun mockAdviceReset() = Unit
 
 @Composable
-private fun LoginScreen(backendUrl: String, onBackendUrlChange: (String) -> Unit, loading: Boolean, onPing: () -> Unit, onLogin: (String) -> Unit) {
+private fun LoginScreen(backendUrl: String, onBackendUrlChange: (String) -> Unit, loading: Boolean, onPing: () -> Unit, onLogin: (String, String) -> Unit) {
     var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(horizontal = 26.dp), verticalArrangement = Arrangement.Center) {
         Text("AI SMARTCLASS  /  CLASS 09", color = ClassroomTeal, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
         Text("Welcome back.", color = ClassroomInk, fontSize = 34.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
         Text("Sign in to your class portal.", color = ClassroomMuted, fontSize = 14.sp, modifier = Modifier.padding(top = 5.dp, bottom = 22.dp))
         OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(password, { password = it }, label = { Text("Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
         OutlinedTextField(backendUrl, onBackendUrlChange, label = { Text("Backend address") }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-        Text("Demo accounts use a blank password. Use only on a private testing network; anyone who can reach this server can sign in as a demo user.", color = ClassroomMuted, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 9.dp))
+        Text("Use the account details provided by your class administrator.", color = ClassroomMuted, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 9.dp))
         Row(Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onLogin(username.trim()) }, enabled = !loading && username.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = ClassroomTeal), shape = RoundedCornerShape(5.dp), modifier = Modifier.weight(1f)) {
+            Button(onClick = { onLogin(username.trim(), password) }, enabled = !loading && username.isNotBlank() && password.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = ClassroomTeal), shape = RoundedCornerShape(5.dp), modifier = Modifier.weight(1f)) {
                 if (loading) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp)) else Text("Sign in", color = Color.White)
             }
             OutlinedButton(onClick = onPing, enabled = !loading && backendUrl.isNotBlank(), shape = RoundedCornerShape(5.dp), modifier = Modifier.weight(1f)) {
                 Text("Test connection", color = ClassroomTeal, fontSize = 12.sp)
             }
         }
-        Text("Student: naruto or sasuke     Teacher: kakashi", color = ClassroomMuted, fontSize = 11.sp, modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 15.dp))
+        Text("Student: IsraKhan     Teacher: YasirKhan", color = ClassroomMuted, fontSize = 11.sp, modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 15.dp))
     }
 }
 

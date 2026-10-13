@@ -5,18 +5,19 @@ import json
 import logging
 import os
 import secrets
-import shutil
 import sqlite3
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 logging.basicConfig(
@@ -26,13 +27,80 @@ logging.basicConfig(
 logger = logging.getLogger("smartclass")
 
 ROOT = Path(__file__).parent
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
+DATABASE_URL = os.getenv("DATABASE_URL")
+DEMO_STUDENT_USERNAME = os.getenv("DEMO_STUDENT_USERNAME", "IsraKhan").strip()
+DEMO_TEACHER_USERNAME = os.getenv("DEMO_TEACHER_USERNAME", "YasirKhan").strip()
+DEMO_STUDENT_PASSWORD = os.getenv("DEMO_STUDENT_PASSWORD", "")
+DEMO_TEACHER_PASSWORD = os.getenv("DEMO_TEACHER_PASSWORD", "")
+if not DEMO_STUDENT_USERNAME or not DEMO_TEACHER_USERNAME or DEMO_STUDENT_USERNAME.lower() == DEMO_TEACHER_USERNAME.lower():
+    raise RuntimeError("Set distinct, non-empty student and teacher usernames")
+if APP_ENV == "production":
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is required when APP_ENV=production")
+    if min(len(DEMO_STUDENT_PASSWORD), len(DEMO_TEACHER_PASSWORD)) < 16:
+        raise RuntimeError("Set separate 16-character DEMO_STUDENT_PASSWORD and DEMO_TEACHER_PASSWORD values in production")
+    if DEMO_STUDENT_PASSWORD == DEMO_TEACHER_PASSWORD:
+        raise RuntimeError("Student and teacher demo passwords must be different")
 DB_PATH = Path(os.getenv("SMARTCLASS_DB", ROOT / "smartclass.db"))
-UPLOADS = Path(os.getenv("SMARTCLASS_UPLOADS", ROOT / "uploads"))
-UPLOADS.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="AI Smartclass API", version="1.0")
 
 
+class DatabaseRow(dict):
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            key = tuple(self.keys())[key]
+        return super().__getitem__(key)
+
+
+class DatabaseCursor:
+    def __init__(self, cursor):
+        self.cursor = cursor
+        self.rowcount = cursor.rowcount
+
+    @staticmethod
+    def _row(row):
+        return DatabaseRow(row) if row is not None else None
+
+    def fetchone(self):
+        return self._row(self.cursor.fetchone())
+
+    def fetchall(self):
+        return [self._row(row) for row in self.cursor.fetchall()]
+
+    def __iter__(self):
+        return (self._row(row) for row in self.cursor)
+
+
+class PostgresConnection:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, query, parameters=()):
+        query = query.replace("CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP::text")
+        return DatabaseCursor(self.connection.execute(query.replace("?", "%s"), parameters))
+
+    def executescript(self, script):
+        for statement in script.split(";"):
+            if statement.strip():
+                self.execute(statement)
+
+    def commit(self):
+        self.connection.commit()
+
+    def rollback(self):
+        self.connection.rollback()
+
+    def close(self):
+        self.connection.close()
+
+
 def connect():
+    if DATABASE_URL:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        return PostgresConnection(psycopg.connect(DATABASE_URL, row_factory=dict_row))
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
@@ -41,6 +109,8 @@ def connect():
 
 def initialize():
     with closing(connect()) as db:
+        if not DATABASE_URL:
+            db.execute("PRAGMA foreign_keys = ON")
         db.executescript("""
         CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, role TEXT NOT NULL CHECK(role IN ('teacher','student')));
         CREATE TABLE IF NOT EXISTS classes(id TEXT PRIMARY KEY, name TEXT NOT NULL, year TEXT NOT NULL, teacher_id TEXT REFERENCES users(id));
@@ -49,20 +119,33 @@ def initialize():
         CREATE TABLE IF NOT EXISTS tests(id TEXT PRIMARY KEY, class_id TEXT REFERENCES classes(id), title TEXT NOT NULL, subject TEXT NOT NULL, kind TEXT NOT NULL, due_date TEXT, paper_path TEXT);
         CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, test_id TEXT REFERENCES tests(id), prompt TEXT NOT NULL, points REAL NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS criteria(id TEXT PRIMARY KEY, test_id TEXT REFERENCES tests(id), name TEXT NOT NULL, weight REAL NOT NULL, guidance TEXT NOT NULL DEFAULT '');
-        CREATE TABLE IF NOT EXISTS submissions(id TEXT PRIMARY KEY, test_id TEXT REFERENCES tests(id), student_id TEXT REFERENCES users(id), pdf_path TEXT NOT NULL, extracted_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'submitted', UNIQUE(test_id, student_id));
+        CREATE TABLE IF NOT EXISTS submissions(id TEXT PRIMARY KEY, test_id TEXT REFERENCES tests(id), student_id TEXT REFERENCES users(id), pdf_path TEXT NOT NULL, extracted_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'submitted', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(test_id, student_id));
         CREATE TABLE IF NOT EXISTS evaluations(id TEXT PRIMARY KEY, submission_id TEXT UNIQUE REFERENCES submissions(id), score REAL NOT NULL, max_score REAL NOT NULL, feedback_json TEXT NOT NULL, teacher_advice TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS profiles(student_id TEXT PRIMARY KEY REFERENCES users(id), context_json TEXT NOT NULL DEFAULT '{}');
         CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS pdf_files(id TEXT PRIMARY KEY, content BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS mock_tests(id TEXT PRIMARY KEY, class_id TEXT NOT NULL REFERENCES classes(id), title TEXT NOT NULL, subject TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
-        CREATE TABLE IF NOT EXISTS mock_questions(id TEXT PRIMARY KEY, test_id TEXT NOT NULL REFERENCES mock_tests(id), prompt TEXT NOT NULL, options_json TEXT NOT NULL, correct_index INTEGER NOT NULL, explanation TEXT NOT NULL, topic TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS mock_attempts(id TEXT PRIMARY KEY, test_id TEXT NOT NULL REFERENCES mock_tests(id), student_id TEXT NOT NULL REFERENCES users(id), answers_json TEXT NOT NULL, score REAL NOT NULL, max_score REAL NOT NULL, submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS mock_questions(id TEXT PRIMARY KEY, test_id TEXT NOT NULL REFERENCES mock_tests(id), prompt TEXT NOT NULL, options_json TEXT NOT NULL, correct_index INTEGER NOT NULL, explanation TEXT NOT NULL, topic TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS mock_attempts(id TEXT PRIMARY KEY, test_id TEXT NOT NULL REFERENCES mock_tests(id), student_id TEXT NOT NULL REFERENCES users(id), answers_json TEXT NOT NULL, score REAL NOT NULL, max_score REAL NOT NULL, submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS mock_advice(student_id TEXT NOT NULL REFERENCES users(id), test_id TEXT NOT NULL REFERENCES mock_tests(id), attempt_id TEXT NOT NULL REFERENCES mock_attempts(id), advice_json TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(student_id,test_id));
         CREATE TABLE IF NOT EXISTS deleted_demo_tests(test_id TEXT PRIMARY KEY);
         """)
-        user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
+        if DATABASE_URL:
+            user_columns = {row["column_name"] for row in db.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='users'")}
+        else:
+            user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
         for column, declaration in (("username", "TEXT"), ("password_salt", "TEXT"), ("password_hash", "TEXT")):
             if column not in user_columns:
                 db.execute(f"ALTER TABLE users ADD COLUMN {column} {declaration}")
+        for table in ("submissions", "mock_questions", "mock_attempts"):
+            if DATABASE_URL:
+                columns = {row["column_name"] for row in db.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=?", (table,))}
+            else:
+                columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+            if "created_at" not in columns:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP")
+            if table == "mock_questions" and "position" not in columns:
+                db.execute("ALTER TABLE mock_questions ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         db.commit()
 
@@ -71,7 +154,36 @@ initialize()
 logger.info("Smartclass database initialized")
 
 
-DEMO_PASSWORD = ""
+def get_integrity_errors():
+    errors = [sqlite3.IntegrityError]
+    if DATABASE_URL:
+        import psycopg
+
+        errors.append(psycopg.IntegrityError)
+    return tuple(errors)
+
+
+def store_pdf(db, content: bytes) -> str:
+    file_id = str(uuid.uuid4())
+    db.execute("INSERT INTO pdf_files(id,content) VALUES(?,?)", (file_id, content))
+    return file_id
+
+
+def load_pdf(db, file_id: str | None) -> bytes | None:
+    if not file_id:
+        return None
+    row = db.execute("SELECT content FROM pdf_files WHERE id=?", (file_id,)).fetchone()
+    if row:
+        return bytes(row["content"])
+    legacy_path = Path(file_id)
+    return legacy_path.read_bytes() if legacy_path.is_file() else None
+
+
+def pdf_response(content: bytes, filename: str) -> Response:
+    safe_filename = urllib.parse.quote(filename, safe="")
+    return Response(content, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename*=UTF-8''{safe_filename}"})
+
+
 CLASS_ID = "class9-algebra"
 
 
@@ -80,18 +192,24 @@ def password_digest(password: str, salt: str) -> str:
 
 
 def seed_demo_data():
-    accounts = (("naruto", "Naruto", "student"), ("sasuke", "Sasuke", "student"), ("kakashi", "Kakashi", "teacher"))
+    student_id = DEMO_STUDENT_USERNAME.lower()
+    teacher_id = DEMO_TEACHER_USERNAME.lower()
+    accounts = (
+        (student_id, DEMO_STUDENT_USERNAME, "student", DEMO_STUDENT_PASSWORD),
+        (teacher_id, DEMO_TEACHER_USERNAME, "teacher", DEMO_TEACHER_PASSWORD),
+    )
     with closing(connect()) as db:
-        for username, name, role in accounts:
-            salt = hashlib.sha256(f"smartclass:{username}".encode()).hexdigest()[:32]
+        for user_id, username, role, password in accounts:
+            salt = secrets.token_hex(16)
             db.execute("""INSERT INTO users(id,name,email,role,username,password_salt,password_hash)
                 VALUES(?,?,NULL,?,?,?,?) ON CONFLICT(username) DO UPDATE SET
                 name=excluded.name, role=excluded.role, password_salt=excluded.password_salt,
-                password_hash=excluded.password_hash""", (username, name, role, username, salt, password_digest(DEMO_PASSWORD, salt)))
-            db.execute("INSERT OR IGNORE INTO profiles(student_id,context_json) VALUES(?,?)", (username, json.dumps({"name": name, "class": "Class 9 - Algebra", "strengths": [], "focus_areas": [], "assessment_history": []})))
-        db.execute("INSERT OR IGNORE INTO classes(id,name,year,teacher_id) VALUES(?,?,?,?)", (CLASS_ID, "Class 9 - Algebra", "2026 / 27", "kakashi"))
-        for student_id in ("naruto", "sasuke"):
-            db.execute("INSERT OR IGNORE INTO enrollments(class_id,student_id) VALUES(?,?)", (CLASS_ID, student_id))
+                password_hash=excluded.password_hash""", (user_id, username, role, username, salt, password_digest(password, salt)))
+            if role == "student":
+                db.execute("INSERT INTO profiles(student_id,context_json) VALUES(?,?) ON CONFLICT DO NOTHING", (user_id, json.dumps({"name": username, "class": "Class 9 - Algebra", "strengths": [], "focus_areas": [], "assessment_history": []})))
+        db.execute("""INSERT INTO classes(id,name,year,teacher_id) VALUES(?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id""", (CLASS_ID, "Class 9 - Algebra", "2026 / 27", teacher_id))
+        db.execute("INSERT INTO enrollments(class_id,student_id) VALUES(?,?) ON CONFLICT DO NOTHING", (CLASS_ID, student_id))
         papers = (
             ("demo-linear-equations", "Linear Equations Check-in", "Mathematics", "Lecture test", "Fri, 17 Oct", "linear_equations.pdf", "linear_equations_key.pdf"),
             ("demo-polynomials", "Polynomials and Factorisation", "Mathematics", "Cumulative", "Mon, 20 Oct", "polynomials.pdf", "polynomials_key.pdf"),
@@ -103,28 +221,27 @@ def seed_demo_data():
             source_key = ROOT / "demo_papers" / key_name
             if not source_paper.is_file() or not source_key.is_file():
                 raise RuntimeError("Demo PDFs are missing; run python generate_demo_pdfs.py in backend/")
-            paper_path = UPLOADS / f"seed-{test_id}-paper.pdf"
-            key_path = UPLOADS / f"seed-{test_id}-answer-key.pdf"
-            if not paper_path.exists():
-                shutil.copyfile(source_paper, paper_path)
-            if not key_path.exists():
-                shutil.copyfile(source_key, key_path)
-            db.execute("""INSERT OR IGNORE INTO tests(id,class_id,title,subject,kind,due_date,paper_path)
-                VALUES(?,?,?,?,?,?,?)""", (test_id, CLASS_ID, title, subject, kind, due_date, str(paper_path)))
-            db.execute("""CREATE TABLE IF NOT EXISTS answer_keys(test_id TEXT PRIMARY KEY REFERENCES tests(id), pdf_path TEXT NOT NULL)""")
-            db.execute("INSERT OR IGNORE INTO answer_keys(test_id,pdf_path) VALUES(?,?)", (test_id, str(key_path)))
             current_paper = db.execute("SELECT paper_path FROM tests WHERE id=?", (test_id,)).fetchone()
-            source_directory = (ROOT / "demo_papers").resolve()
-            if current_paper and current_paper["paper_path"] and Path(current_paper["paper_path"]).resolve().parent == source_directory:
-                db.execute("UPDATE tests SET paper_path=? WHERE id=?", (str(paper_path), test_id))
+            paper_path = current_paper["paper_path"] if current_paper else None
+            if not paper_path or load_pdf(db, paper_path) is None:
+                source = Path(paper_path) if paper_path and Path(paper_path).is_file() else source_paper
+                paper_path = store_pdf(db, source.read_bytes())
+            db.execute("""INSERT INTO tests(id,class_id,title,subject,kind,due_date,paper_path)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING""", (test_id, CLASS_ID, title, subject, kind, due_date, paper_path))
+            db.execute("""CREATE TABLE IF NOT EXISTS answer_keys(test_id TEXT PRIMARY KEY REFERENCES tests(id), pdf_path TEXT NOT NULL)""")
             current_key = db.execute("SELECT pdf_path FROM answer_keys WHERE test_id=?", (test_id,)).fetchone()
-            if current_key and Path(current_key["pdf_path"]).resolve().parent == source_directory:
-                db.execute("UPDATE answer_keys SET pdf_path=? WHERE test_id=?", (str(key_path), test_id))
-            db.execute("INSERT OR IGNORE INTO criteria(id,test_id,name,weight,guidance) VALUES(?,?,?,?,?)", (f"{test_id}-criteria", test_id, "Method and accuracy", 1.0, "Award partial credit for correct working; explain arithmetic and algebra errors."))
+            key_path = current_key["pdf_path"] if current_key else None
+            if not key_path or load_pdf(db, key_path) is None:
+                source = Path(key_path) if key_path and Path(key_path).is_file() else source_key
+                key_path = store_pdf(db, source.read_bytes())
+            db.execute("INSERT INTO answer_keys(test_id,pdf_path) VALUES(?,?) ON CONFLICT DO NOTHING", (test_id, key_path))
+            db.execute("UPDATE answer_keys SET pdf_path=? WHERE test_id=?", (key_path, test_id))
+            db.execute("UPDATE tests SET paper_path=? WHERE id=?", (paper_path, test_id))
+            db.execute("INSERT INTO criteria(id,test_id,name,weight,guidance) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING", (f"{test_id}-criteria", test_id, "Method and accuracy", 1.0, "Award partial credit for correct working; explain arithmetic and algebra errors."))
             for question_number in range(1, 11):
-                db.execute("INSERT OR IGNORE INTO questions(id,test_id,prompt,points) VALUES(?,?,?,?)", (f"{test_id}-q{question_number}", test_id, f"Question {question_number} from the attached test paper", 2))
+                db.execute("INSERT INTO questions(id,test_id,prompt,points) VALUES(?,?,?,?) ON CONFLICT DO NOTHING", (f"{test_id}-q{question_number}", test_id, f"Question {question_number} from the attached test paper", 2))
         mock_test_id = "mock-class9-algebra"
-        db.execute("INSERT OR IGNORE INTO mock_tests(id,class_id,title,subject,description) VALUES(?,?,?,?,?)", (mock_test_id, CLASS_ID, "Algebra Quick Check", "Mathematics", "Ten multiple-choice questions. Take it any time and retake it to practise."))
+        db.execute("INSERT INTO mock_tests(id,class_id,title,subject,description) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING", (mock_test_id, CLASS_ID, "Algebra Quick Check", "Mathematics", "Ten multiple-choice questions. Take it any time and retake it to practise."))
         mock_questions = (
             ("Solve: 2x + 3 = 13.", ["x = 3", "x = 4", "x = 5", "x = 6"], 2, "Subtract 3 to get 2x = 10, then divide by 2.", "Linear equations"),
             ("Solve: 4y = 28.", ["y = 6", "y = 7", "y = 8", "y = 9"], 1, "Divide both sides by 4.", "Inverse operations"),
@@ -138,7 +255,9 @@ def seed_demo_data():
             ("Expand: 5(2x - 1).", ["10x - 1", "7x - 5", "10x - 5", "10x + 5"], 2, "Multiply both 2x and -1 by 5.", "Expansion"),
         )
         for question_number, (prompt, options, correct_index, explanation, topic) in enumerate(mock_questions, start=1):
-            db.execute("INSERT OR IGNORE INTO mock_questions(id,test_id,prompt,options_json,correct_index,explanation,topic) VALUES(?,?,?,?,?,?,?)", (f"{mock_test_id}-q{question_number}", mock_test_id, prompt, json.dumps(options), correct_index, explanation, topic))
+            question_id = f"{mock_test_id}-q{question_number}"
+            db.execute("INSERT INTO mock_questions(id,test_id,prompt,options_json,correct_index,explanation,topic,position) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING", (question_id, mock_test_id, prompt, json.dumps(options), correct_index, explanation, topic, question_number))
+            db.execute("UPDATE mock_questions SET position=? WHERE id=? AND position=0", (question_number, question_id))
         db.commit()
 
 
@@ -210,6 +329,8 @@ def model_for_provider(provider: str) -> str:
 
 @app.get("/api/health")
 def health():
+    with closing(connect()) as db:
+        db.execute("SELECT 1")
     provider = configured_provider()
     if provider == "openai":
         api_configured = bool(os.getenv("OPENAI_API_KEY") or os.getenv("AI_API_KEY"))
@@ -223,7 +344,7 @@ def health():
 @app.post("/api/login")
 def login(data: Login):
     with closing(connect()) as db:
-        row = db.execute("SELECT id,name,username,role,password_salt,password_hash FROM users WHERE username=?", (data.username.strip().lower(),)).fetchone()
+        row = db.execute("SELECT id,name,username,role,password_salt,password_hash FROM users WHERE lower(username)=?", (data.username.strip().lower(),)).fetchone()
         if not row or not hmac.compare_digest(password_digest(data.password, row["password_salt"]), row["password_hash"]):
             logger.warning("Rejected login attempt")
             raise HTTPException(401, "Incorrect username or password")
@@ -339,17 +460,17 @@ def delete_test(test_id: str, user: dict = Depends(authenticated_user)):
             files.append(answer_key["pdf_path"])
         files.extend(row["pdf_path"] for row in db.execute("SELECT pdf_path FROM submissions WHERE test_id=?", (test_id,)))
         if test_id in {"demo-linear-equations", "demo-polynomials"}:
-            db.execute("INSERT OR IGNORE INTO deleted_demo_tests(test_id) VALUES(?)", (test_id,))
+            db.execute("INSERT INTO deleted_demo_tests(test_id) VALUES(?) ON CONFLICT DO NOTHING", (test_id,))
         db.execute("DELETE FROM evaluations WHERE submission_id IN (SELECT id FROM submissions WHERE test_id=?)", (test_id,))
         db.execute("DELETE FROM submissions WHERE test_id=?", (test_id,))
         db.execute("DELETE FROM questions WHERE test_id=?", (test_id,))
         db.execute("DELETE FROM criteria WHERE test_id=?", (test_id,))
         db.execute("DELETE FROM answer_keys WHERE test_id=?", (test_id,))
         db.execute("DELETE FROM tests WHERE id=?", (test_id,))
+        for file_id in files:
+            if file_id:
+                db.execute("DELETE FROM pdf_files WHERE id=?", (file_id,))
         db.commit()
-    for filename in files:
-        if filename:
-            Path(filename).unlink(missing_ok=True)
     logger.info("Teacher deleted class test and related PDFs")
     return {"deleted": True, "test_id": test_id}
 
@@ -370,7 +491,7 @@ def mock_test_questions(test_id: str, user: dict = Depends(authenticated_user)):
         if not test:
             raise HTTPException(404, "Mock test not found")
         require_class_access(test["class_id"], user)
-        rows = db.execute("SELECT id,prompt,options_json FROM mock_questions WHERE test_id=? ORDER BY rowid", (test_id,)).fetchall()
+        rows = db.execute("SELECT id,prompt,options_json FROM mock_questions WHERE test_id=? ORDER BY position,id", (test_id,)).fetchall()
         return [{"id": row["id"], "prompt": row["prompt"], "options": json.loads(row["options_json"])} for row in rows]
 
 
@@ -386,7 +507,7 @@ def latest_mock_attempt(test_id: str, user: dict = Depends(authenticated_user)):
         row = db.execute("""SELECT a.*,COUNT(q.id) AS total_questions,d.advice_json FROM mock_attempts a
             LEFT JOIN mock_questions q ON q.test_id=a.test_id
             LEFT JOIN mock_advice d ON d.student_id=a.student_id AND d.test_id=a.test_id AND d.attempt_id=a.id
-            WHERE a.test_id=? AND a.student_id=? GROUP BY a.id ORDER BY a.rowid DESC LIMIT 1""", (test_id, user["id"])).fetchone()
+            WHERE a.test_id=? AND a.student_id=? GROUP BY a.id ORDER BY a.created_at DESC,a.id DESC LIMIT 1""", (test_id, user["id"])).fetchone()
         if not row:
             return {"attempt": None}
         return {"attempt": {"id": row["id"], "test_id": row["test_id"], "score": row["score"], "max_score": row["max_score"], "total_questions": row["total_questions"], "answers": json.loads(row["answers_json"]), "submitted_at": row["submitted_at"], "last_advice": json.loads(row["advice_json"]) if row["advice_json"] else None}}
@@ -401,7 +522,7 @@ def submit_mock_attempt(test_id: str, data: MockAttemptInput, user: dict = Depen
         if not test:
             raise HTTPException(404, "Mock test not found")
         require_class_access(test["class_id"], user)
-        questions = db.execute("SELECT id,correct_index,topic FROM mock_questions WHERE test_id=? ORDER BY rowid", (test_id,)).fetchall()
+        questions = db.execute("SELECT id,correct_index,topic,options_json FROM mock_questions WHERE test_id=? ORDER BY position,id", (test_id,)).fetchall()
         if not questions:
             raise HTTPException(409, "This mock test has no questions")
         expected_ids = {question["id"] for question in questions}
@@ -409,12 +530,13 @@ def submit_mock_attempt(test_id: str, data: MockAttemptInput, user: dict = Depen
             raise HTTPException(422, "Answer every question before submitting")
         for question in questions:
             selected = data.answers[question["id"]]
-            option_count = db.execute("SELECT json_array_length(options_json) FROM mock_questions WHERE id=?", (question["id"],)).fetchone()[0]
+            option_count = len(json.loads(question["options_json"]))
             if selected < 0 or selected >= option_count:
                 raise HTTPException(422, "An answer choice is invalid")
         score = sum(data.answers[question["id"]] == question["correct_index"] for question in questions)
         attempt_id = str(uuid.uuid4())
-        db.execute("INSERT INTO mock_attempts(id,test_id,student_id,answers_json,score,max_score) VALUES(?,?,?,?,?,?)", (attempt_id, test_id, user["id"], json.dumps(data.answers), score, len(questions)))
+        submitted_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        db.execute("INSERT INTO mock_attempts(id,test_id,student_id,answers_json,score,max_score,submitted_at,created_at) VALUES(?,?,?,?,?,?,?,?)", (attempt_id, test_id, user["id"], json.dumps(data.answers), score, len(questions), submitted_at, submitted_at))
         db.execute("DELETE FROM mock_advice WHERE student_id=? AND test_id=?", (user["id"], test_id))
         profile = db.execute("SELECT context_json FROM profiles WHERE student_id=?", (user["id"],)).fetchone()
         if profile:
@@ -443,18 +565,17 @@ async def upload_test_paper(test_id: str, paper: UploadFile = File(...), user: d
     if not pdf_bytes.startswith(b"%PDF-"):
         logger.warning("Rejected malformed test paper")
         raise HTTPException(422, "The uploaded file is not a readable PDF")
-    path = UPLOADS / f"{uuid.uuid4()}.pdf"
-    path.write_bytes(pdf_bytes)
     with closing(connect()) as db:
-        updated = db.execute("UPDATE tests SET paper_path=? WHERE id=?", (str(path), test_id)).rowcount
+        file_id = store_pdf(db, pdf_bytes)
+        updated = db.execute("UPDATE tests SET paper_path=? WHERE id=?", (file_id, test_id)).rowcount
+        if updated and test["paper_path"]:
+            db.execute("DELETE FROM pdf_files WHERE id=?", (test["paper_path"],))
+        if not updated:
+            db.execute("DELETE FROM pdf_files WHERE id=?", (file_id,))
         db.commit()
     if not updated:
-        path.unlink(missing_ok=True)
         logger.warning("Could not attach test paper: test not found")
         raise HTTPException(404, "Test not found")
-    old_path = Path(test["paper_path"]) if test["paper_path"] else None
-    if old_path and old_path != path and old_path.resolve().is_relative_to(UPLOADS.resolve()):
-        old_path.unlink(missing_ok=True)
     logger.info("Test paper uploaded")
     return {"test_id": test_id, "paper": paper.filename, "stored": True}
 
@@ -463,12 +584,13 @@ async def upload_test_paper(test_id: str, paper: UploadFile = File(...), user: d
 def download_test_paper(test_id: str, user: dict = Depends(authenticated_user)):
     with closing(connect()) as db:
         row = db.execute("SELECT class_id,title,paper_path FROM tests WHERE id=?", (test_id,)).fetchone()
+        content = load_pdf(db, row["paper_path"]) if row else None
     if not row:
         raise HTTPException(404, "Test not found")
     require_class_access(row["class_id"], user)
-    if not row["paper_path"] or not Path(row["paper_path"]).is_file():
+    if content is None:
         raise HTTPException(404, "Question paper is not available")
-    return FileResponse(row["paper_path"], media_type="application/pdf", filename=f"{row['title']}-question-paper.pdf")
+    return pdf_response(content, f"{row['title']}-question-paper.pdf")
 
 
 @app.post("/api/tests/{test_id}/questions")
@@ -515,14 +637,14 @@ async def submit_answers(test_id: str, answer_sheet: UploadFile = File(...), use
     if not pdf_bytes.startswith(b"%PDF-"):
         logger.warning("Rejected malformed answer-sheet PDF")
         raise HTTPException(422, "The uploaded file is not a readable PDF")
-    path = UPLOADS / f"{uuid.uuid4()}.pdf"
-    path.write_bytes(pdf_bytes)
     submission_id = str(uuid.uuid4())
     with closing(connect()) as db:
+        file_id = store_pdf(db, pdf_bytes)
         try:
-            db.execute("INSERT INTO submissions(id,test_id,student_id,pdf_path) VALUES(?,?,?,?)", (submission_id, test_id, user["id"], str(path)))
-        except sqlite3.IntegrityError as error:
-            path.unlink(missing_ok=True)
+            submitted_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+            db.execute("INSERT INTO submissions(id,test_id,student_id,pdf_path,created_at) VALUES(?,?,?,?,?)", (submission_id, test_id, user["id"], file_id, submitted_at))
+        except get_integrity_errors() as error:
+            db.rollback()
             raise HTTPException(409, "You already submitted work for this test") from error
         db.commit()
     logger.info("Answer-sheet PDF received and stored for evaluation")
@@ -536,7 +658,7 @@ def list_class_submissions(class_id: str, user: dict = Depends(authenticated_use
         rows = db.execute("""SELECT s.id,s.test_id,s.student_id,s.status,t.title,u.name AS student_name,
             e.score,e.max_score,e.feedback_json,e.teacher_advice FROM submissions s
             JOIN tests t ON t.id=s.test_id JOIN users u ON u.id=s.student_id
-            LEFT JOIN evaluations e ON e.submission_id=s.id WHERE t.class_id=? ORDER BY s.rowid DESC""", (class_id,)).fetchall()
+            LEFT JOIN evaluations e ON e.submission_id=s.id WHERE t.class_id=? ORDER BY s.created_at DESC,s.id DESC""", (class_id,)).fetchall()
         return [{**dict(row), "feedback": json.loads(row["feedback_json"]) if row["feedback_json"] else None} for row in rows]
 
 
@@ -547,7 +669,7 @@ def list_my_submissions(user: dict = Depends(authenticated_user)):
     with closing(connect()) as db:
         rows = db.execute("""SELECT s.id,s.test_id,s.status,t.title,t.subject,
             e.score,e.max_score,e.feedback_json,e.teacher_advice FROM submissions s JOIN tests t ON t.id=s.test_id
-            LEFT JOIN evaluations e ON e.submission_id=s.id WHERE s.student_id=? ORDER BY s.rowid DESC""", (user["id"],)).fetchall()
+            LEFT JOIN evaluations e ON e.submission_id=s.id WHERE s.student_id=? ORDER BY s.created_at DESC,s.id DESC""", (user["id"],)).fetchall()
         return [{**dict(row), "feedback": json.loads(row["feedback_json"]) if row["feedback_json"] else None} for row in rows]
 
 
@@ -555,15 +677,16 @@ def list_my_submissions(user: dict = Depends(authenticated_user)):
 def download_answer_sheet(submission_id: str, user: dict = Depends(authenticated_user)):
     with closing(connect()) as db:
         row = db.execute("""SELECT s.pdf_path,s.student_id,t.class_id FROM submissions s JOIN tests t ON t.id=s.test_id WHERE s.id=?""", (submission_id,)).fetchone()
+        content = load_pdf(db, row["pdf_path"]) if row else None
     if not row:
         raise HTTPException(404, "Submission not found")
     if user["role"] == "student" and user["id"] != row["student_id"]:
         raise HTTPException(403, "You can only view your own answer sheet")
     if user["role"] == "teacher":
         require_class_access(row["class_id"], user, teacher_only=True)
-    if not Path(row["pdf_path"]).is_file():
+    if content is None:
         raise HTTPException(404, "Answer-sheet file not found")
-    return FileResponse(row["pdf_path"], media_type="application/pdf", filename="answer-sheet.pdf")
+    return pdf_response(content, "answer-sheet.pdf")
 
 
 def get_openai_evaluation(prompt: str, answer_pdf_path: str, question_pdf_path: str, answer_key_path: str | None, api_key: str):
@@ -838,7 +961,7 @@ def view_mock_advice(attempt_id: str, user: dict = Depends(authenticated_user)):
             raise HTTPException(404, "Mock test attempt not found")
         if attempt["student_id"] != user["id"]:
             raise HTTPException(403, "You can only view advice for your own attempt")
-        questions = db.execute("SELECT prompt,options_json,correct_index,explanation,topic FROM mock_questions WHERE test_id=? ORDER BY rowid", (attempt["test_id"],)).fetchall()
+        questions = db.execute("SELECT prompt,options_json,correct_index,explanation,topic FROM mock_questions WHERE test_id=? ORDER BY position,id", (attempt["test_id"],)).fetchall()
         profile_row = db.execute("SELECT context_json FROM profiles WHERE student_id=?", (user["id"],)).fetchone()
         profile = json.loads(profile_row["context_json"]) if profile_row else {}
         answers = json.loads(attempt["answers_json"])
@@ -884,20 +1007,34 @@ def evaluate_submission(submission_id: str, user: dict = Depends(authenticated_u
             raise HTTPException(403, "You can only evaluate your own answer sheet")
         if user["role"] == "teacher":
             require_class_access(row["class_id"], user, teacher_only=True)
-        if not row["paper_path"] or not Path(row["paper_path"]).is_file():
+        question_pdf = load_pdf(db, row["paper_path"])
+        answer_pdf = load_pdf(db, row["pdf_path"])
+        if question_pdf is None:
             raise HTTPException(409, "The teacher has not uploaded a question paper for this test")
+        if answer_pdf is None:
+            raise HTTPException(404, "Answer-sheet file not found")
         questions = [dict(item) for item in db.execute("SELECT prompt,points FROM questions WHERE test_id=?", (row["test_id"],))]
         criteria = [dict(item) for item in db.execute("SELECT name,weight,guidance FROM criteria WHERE test_id=?", (row["test_id"],))]
         answer_key = db.execute("SELECT pdf_path FROM answer_keys WHERE test_id=?", (row["test_id"],)).fetchone()
+        answer_key_pdf = load_pdf(db, answer_key["pdf_path"]) if answer_key else None
         profile_row = db.execute("SELECT context_json FROM profiles WHERE student_id=?", (row["student_id"],)).fetchone()
         context = profile_row["context_json"] if profile_row else "{}"
         evaluation_prompt = {"test": row["title"], "subject": row["subject"], "questions": questions, "rubric": criteria, "student_profile": context}
-        if answer_key and Path(answer_key["pdf_path"]).is_file():
+        if answer_key_pdf is not None:
             evaluation_prompt["teacher_answer_key"] = "An attached internal answer-key PDF is available for grading accuracy."
-        answer_key_path = answer_key["pdf_path"] if answer_key else None
-        result = get_ai_evaluation(json.dumps(evaluation_prompt), row["pdf_path"], row["paper_path"], answer_key_path)
+        with tempfile.TemporaryDirectory() as temp_directory:
+            temp_directory = Path(temp_directory)
+            question_path = temp_directory / "question-paper.pdf"
+            answer_path = temp_directory / "answer-sheet.pdf"
+            question_path.write_bytes(question_pdf)
+            answer_path.write_bytes(answer_pdf)
+            answer_key_path = None
+            if answer_key_pdf is not None:
+                answer_key_path = temp_directory / "answer-key.pdf"
+                answer_key_path.write_bytes(answer_key_pdf)
+            result = get_ai_evaluation(json.dumps(evaluation_prompt), str(answer_path), str(question_path), str(answer_key_path) if answer_key_path else None)
         evaluation_id = str(uuid.uuid4())
-        db.execute("INSERT OR REPLACE INTO evaluations(id,submission_id,score,max_score,feedback_json,teacher_advice) VALUES(?,?,?,?,?,?)", (evaluation_id, submission_id, result["score"], result["max_score"], json.dumps(result.get("feedback", [])), result.get("teacher_advice", "")))
+        db.execute("INSERT INTO evaluations(id,submission_id,score,max_score,feedback_json,teacher_advice) VALUES(?,?,?,?,?,?) ON CONFLICT(submission_id) DO UPDATE SET score=excluded.score,max_score=excluded.max_score,feedback_json=excluded.feedback_json,teacher_advice=excluded.teacher_advice,created_at=CURRENT_TIMESTAMP", (evaluation_id, submission_id, result["score"], result["max_score"], json.dumps(result.get("feedback", [])), result.get("teacher_advice", "")))
         db.execute("UPDATE submissions SET status='evaluated' WHERE id=?", (submission_id,))
         history = json.loads(context)
         history.setdefault("assessment_history", []).append({"test": row["title"], "score": result["score"], "max_score": result["max_score"], "feedback": result.get("feedback", [])})
