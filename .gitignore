@@ -6,3 +6,4 @@ backend/*.db
 backend/uploads/
 .env
 backend/.env
+/render-secrets.txt
