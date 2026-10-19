@@ -781,6 +781,77 @@ def list_my_test_analyses(user: dict = Depends(authenticated_user)):
     return [{"test_id": row["test_id"], "title": row["title"], "subject": row["subject"], "date": row["created_at"], **{key: json.loads(row["result_json"]).get(key) for key in fields}} for row in rows]
 
 
+@app.get("/api/tests/{test_id}/attempts")
+def get_test_attempts(test_id: str, student_id: str | None = None, user: dict = Depends(authenticated_user)):
+    with closing(connect()) as db:
+        test = db.execute("SELECT id,class_id,subject,title,deleted_at FROM tests WHERE id=?", (test_id,)).fetchone()
+        if not test or test["deleted_at"]:
+            raise HTTPException(404, "Test not found")
+        require_class_access(test["class_id"], user, teacher_only=user["role"] == "teacher")
+        questions = [dict(row) for row in db.execute("SELECT id,prompt,points,question_type,options_json,answer_key,position FROM questions WHERE test_id=? ORDER BY position,id", (test_id,))]
+        paper = []
+        for question in questions:
+            entry = {
+                "id": question["id"],
+                "prompt": question["prompt"],
+                "points": question["points"],
+                "question_type": question["question_type"],
+                "options": json.loads(question["options_json"] or "[]"),
+            }
+            if user["role"] != "student":
+                entry["answer_key"] = json.loads(question["answer_key"]) if question["answer_key"] else None
+            paper.append(entry)
+        if user["role"] == "student":
+            attempt = db.execute("SELECT * FROM test_attempts WHERE test_id=? AND student_id=? AND is_mock=0 ORDER BY submitted_at DESC LIMIT 1", (test_id, user["id"])).fetchone()
+            if not attempt:
+                raise HTTPException(404, "No submitted attempt found for this test")
+            answer_map = json.loads(attempt["answers_json"]) if attempt["answers_json"] else {}
+            result = None
+            analysis = db.execute("SELECT result_json FROM test_analyses WHERE attempt_id=?", (attempt["id"],)).fetchone()
+            if analysis:
+                result = json.loads(analysis["result_json"])
+            return {
+                "test_id": test_id,
+                "student_id": user["id"],
+                "status": attempt["status"],
+                "submitted_at": attempt["submitted_at"],
+                "question_paper": [{**item, "student_answer": answer_map.get(item["id"], "")} for item in paper],
+                "answers": answer_map,
+                "result": result,
+            }
+        if not user.get("is_admin") and user["role"] == "teacher":
+            allowed = db.execute("SELECT 1 FROM teacher_assignments WHERE class_id=? AND teacher_id=? AND unassigned_at IS NULL LIMIT 1", (test["class_id"], user["id"])).fetchone()
+            if not allowed:
+                raise HTTPException(403, "You are not assigned to this class")
+        rows = db.execute("SELECT * FROM test_attempts WHERE test_id=? AND is_mock=0 ORDER BY submitted_at DESC", (test_id,)).fetchall()
+        attempts = []
+        for attempt in rows:
+            answer_map = json.loads(attempt["answers_json"]) if attempt["answers_json"] else {}
+            analysis = db.execute("SELECT result_json FROM test_analyses WHERE attempt_id=?", (attempt["id"],)).fetchone()
+            result = json.loads(analysis["result_json"]) if analysis else None
+            if student_id and attempt["student_id"] != student_id:
+                continue
+            attempts.append({
+                "student_id": attempt["student_id"],
+                "status": attempt["status"],
+                "submitted_at": attempt["submitted_at"],
+                "answers": answer_map,
+                "result": result,
+            })
+        if student_id and not attempts:
+            raise HTTPException(404, "No submitted attempt found for this student")
+        selected_student = student_id if student_id else (attempts[0]["student_id"] if attempts else None)
+        selected_answers = next((item["answers"] for item in attempts if item["student_id"] == selected_student), {})
+        return {
+            "test_id": test_id,
+            "question_paper": [{**item, "student_answer": selected_answers.get(item["id"], "")} for item in paper],
+            "attempts": attempts,
+            "student_id": selected_student,
+            "answers": selected_answers,
+            "result": next((item["result"] for item in attempts if item["student_id"] == selected_student), None),
+        }
+
+
 @app.get("/api/classes/{class_id}/students/{student_id}/analysis")
 def get_student_analysis(class_id: str, student_id: str, as_of: str | None = None, subject: str | None = None, user: dict = Depends(authenticated_user)):
     if user["role"] != "teacher" or user.get("is_admin"):

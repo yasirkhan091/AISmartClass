@@ -61,12 +61,14 @@ import java.util.Calendar
 import java.util.concurrent.Executors
 
 private const val ClassroomLog = "AIClassroom"
-private val Ink = Color(0xFF172B2A)
-private val Muted = Color(0xFF71817C)
-private val Paper = Color(0xFFF6F7F1)
-private val Green = Color(0xFFB9E5C8)
-private val Teal = Color(0xFF176B5B)
-private val Coral = Color(0xFFF2A78F)
+private val Ink = Color(0xFF10242E)
+private val Muted = Color(0xFF5E7381)
+private val Paper = Color(0xFFF5F7FB)
+private val Green = Color(0xFFBFE7D7)
+private val Teal = Color(0xFF145C56)
+private val Coral = Color(0xFFE8846B)
+private val Accent = Color(0xFF2B7A78)
+private val Panel = Color(0xFFFFFFFF)
 
 private data class SchoolClass(val id: String, val name: String, val year: String, val isClassTeacher: Boolean = false, val subjects: List<String> = emptyList())
 private data class SignedInUser(val id: String, val name: String, val username: String, val role: String, val isAdmin: Boolean, val token: String, val classes: List<SchoolClass>)
@@ -101,6 +103,8 @@ private fun SmartclassRoot(context: Context) {
     var report by remember { mutableStateOf<JSONObject?>(null) }
     var reportStudent by remember { mutableStateOf<StudentRating?>(null) }
     var reportIsClassTeacher by remember { mutableStateOf(false) }
+    var reviewAttempt by remember { mutableStateOf<JSONObject?>(null) }
+    var reviewTitle by remember { mutableStateOf("") }
     var showBuilder by remember { mutableStateOf(false) }
     var editingTest by remember { mutableStateOf<DigitalTest?>(null) }
     var editingQuestions by remember { mutableStateOf(emptyList<DraftQuestion>()) }
@@ -255,6 +259,12 @@ private fun SmartclassRoot(context: Context) {
                     onPage = { page = it },
                     onLogout = { user = null; tests.clear(); analyses.clear(); ratings.clear() },
                     onOpenTest = { openExam(it, current) },
+                    onReviewAttempt = { test ->
+                        perform("Could not load your test review") {
+                            val payload = SmartclassApi(backendUrl, current.token).attemptReview(test.id)
+                            activity.runOnUiThread { reviewAttempt = payload; reviewTitle = test.title }
+                        }
+                    },
                     onOpenBuilder = { editingTest = null; editingQuestions = emptyList(); showBuilder = true },
                     onEditTest = { selectedTest ->
                         perform("Could not open test for editing") {
@@ -270,6 +280,12 @@ private fun SmartclassRoot(context: Context) {
                         }
                     },
                     onReport = { item, subject -> openStudentReport(item, current, subject = subject) },
+                    onReviewStudentAttempt = { test, studentId ->
+                        perform("Could not load this student submission") {
+                            val payload = SmartclassApi(backendUrl, current.token).attemptReview(test.id, studentId)
+                            activity.runOnUiThread { reviewAttempt = payload; reviewTitle = test.title }
+                        }
+                    },
                     onAddStudent = { showAdminDialog = "student" },
                     onAddTeacher = { showAdminDialog = "teacher" },
                     onEditUser = { editingAdminUser = it; showAdminDialog = "update" },
@@ -284,6 +300,7 @@ private fun SmartclassRoot(context: Context) {
             }
         }
     }
+    if (reviewAttempt != null) ReviewAttemptDialog(title = reviewTitle, payload = reviewAttempt!!, onDismiss = { reviewAttempt = null; reviewTitle = "" })
     if (showBuilder) TestBuilderDialog(existingTest = editingTest, initialQuestions = editingQuestions, subjects = activeClass?.subjects.orEmpty(), onDismiss = { showBuilder = false; editingTest = null; editingQuestions = emptyList() }, onPublish = { existingTest, title, subject, kind, dueDate, durationMinutes, draft ->
         val publisher = user ?: return@TestBuilderDialog
         if (draft.isEmpty()) { error = "Add at least one question before publishing." }
@@ -375,8 +392,8 @@ private fun PortalPanel(
     user: SignedInUser, activeClass: SchoolClass?, classes: List<SchoolClass>, page: String, busy: Boolean,
     tests: List<DigitalTest>, analyses: List<TestAnalysis>, ratings: List<StudentRating>, metrics: List<JSONObject>, adminUsers: List<JSONObject>,
     onClass: (String) -> Unit, onPage: (String) -> Unit, onLogout: () -> Unit,
-    onOpenTest: (DigitalTest) -> Unit, onOpenBuilder: () -> Unit, onEditTest: (DigitalTest) -> Unit, onDeleteTest: (DigitalTest) -> Unit,
-    onReport: (StudentRating, String?) -> Unit, onAddStudent: () -> Unit, onAddTeacher: () -> Unit,
+    onOpenTest: (DigitalTest) -> Unit, onReviewAttempt: (DigitalTest) -> Unit, onOpenBuilder: () -> Unit, onEditTest: (DigitalTest) -> Unit, onDeleteTest: (DigitalTest) -> Unit,
+    onReport: (StudentRating, String?) -> Unit, onReviewStudentAttempt: (DigitalTest, String) -> Unit, onAddStudent: () -> Unit, onAddTeacher: () -> Unit,
     onEditUser: (JSONObject) -> Unit, onDeleteUser: (JSONObject) -> Unit, onCreateMetric: () -> Unit
 ) {
     val admin = user.isAdmin
@@ -494,7 +511,7 @@ private fun PortalPanel(
                     val filtered = available.filter { it.subject == selection }
                     if (selection.isBlank()) item { BlankState("Choose a subject", "Tests will appear after you select their subject.") }
                     else if (filtered.isEmpty()) item { BlankState("No tests available", "There are no published ${if (mockPage) "mock" else "regular"} tests for this subject.") }
-                    items(filtered, key = { it.id }) { test -> TestCard(test, teacher || admin, onOpenTest, onEditTest, { pendingDeleteTest = it }) }
+                    items(filtered, key = { it.id }) { test -> TestCard(test, teacher || admin, onOpenTest, onReviewAttempt, onEditTest, { pendingDeleteTest = it }, onReviewStudentAttempt) }
                 }
             }
         }
@@ -534,20 +551,21 @@ private fun ChoiceDropdown(label: String, value: String, options: List<String>, 
 }
 
 @Composable
-private fun TestCard(test: DigitalTest, teacher: Boolean, onOpen: (DigitalTest) -> Unit, onEdit: (DigitalTest) -> Unit, onDelete: (DigitalTest) -> Unit) {
-    Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(7.dp)).padding(15.dp)) {
+private fun TestCard(test: DigitalTest, teacher: Boolean, onOpen: (DigitalTest) -> Unit, onReviewAttempt: (DigitalTest) -> Unit, onEdit: (DigitalTest) -> Unit, onDelete: (DigitalTest) -> Unit, onReviewStudentAttempt: (DigitalTest, String) -> Unit) {
+    Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(12.dp)).padding(15.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(test.subject.uppercase(), color = Teal, fontSize = 10.sp, fontWeight = FontWeight.Bold); Text(if (test.isMock) "MOCK" else test.dueDate, color = Muted, fontSize = 10.sp) }
         Text(test.title, color = Ink, fontSize = 18.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 5.dp))
         Text("${test.questionCount} questions  ·  ${test.kind}", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp, bottom = 10.dp))
         if (teacher) {
             Text("${test.studentsTaken} students have attempted this test", color = Muted, fontSize = 11.sp)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                if (!test.isMock) TextButton(onClick = { onReviewAttempt(test) }) { Text("Review", color = Teal) }
                 if (test.studentsTaken == 0 && !test.isMock) TextButton(onClick = { onEdit(test) }) { Text("Edit", color = Teal) }
                 if (!test.isMock) TextButton(onClick = { onDelete(test) }) { Text("Delete", color = Coral) }
             }
         } else {
-            val action = when { test.isMock -> "Try mock test"; test.pending -> "Retry AI analysis"; test.completed -> "Completed"; else -> "Start test" }
-            Button(onClick = { onOpen(test) }, enabled = test.isMock || !test.completed, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Teal), shape = RoundedCornerShape(5.dp)) { Text(action, color = Color.White) }
+            val action = when { test.isMock -> "Try mock test"; test.pending -> "Retry AI analysis"; test.completed -> "Review submission"; else -> "Start test" }
+            Button(onClick = { if (test.completed) onReviewAttempt(test) else onOpen(test) }, enabled = test.isMock || !test.completed || test.completed, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Teal), shape = RoundedCornerShape(8.dp)) { Text(action, color = Color.White) }
         }
     }
 }
@@ -641,6 +659,74 @@ private fun RatingCard(item: StudentRating, subjectFilter: String? = null, onCli
         if (metricText.isNotBlank()) Text(metricText, color = Teal, fontSize = 10.sp, modifier = Modifier.padding(top = 5.dp))
         Text("Open student analysis", color = Teal, fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
     }
+}
+
+@Composable
+private fun ReviewAttemptDialog(title: String, payload: JSONObject, onDismiss: () -> Unit) {
+    val paper = payload.optJSONArray("question_paper") ?: JSONArray()
+    val attempts = payload.optJSONArray("attempts") ?: JSONArray()
+    val selectedStudent = payload.optString("student_id")
+    var selectedAttemptStudent by remember(selectedStudent, attempts.length()) {
+        mutableStateOf(selectedStudent.ifBlank { if (attempts.length() > 0) attempts.getJSONObject(0).optString("student_id") else "" })
+    }
+    val selectedStudentAnswers = if (attempts.length() > 0) {
+        val match = (0 until attempts.length()).firstOrNull { attempts.getJSONObject(it).optString("student_id") == selectedAttemptStudent }
+        if (match != null) {
+            attempts.getJSONObject(match).optJSONObject("answers") ?: JSONObject()
+        } else {
+            payload.optJSONObject("answers") ?: JSONObject()
+        }
+    } else payload.optJSONObject("answers") ?: JSONObject()
+    val result = payload.optJSONObject("result")
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(title, color = Ink, fontFamily = FontFamily.Serif) }, text = {
+        LazyColumn(Modifier.height(520.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (attempts.length() > 0) {
+                item { Text("Attempt history", color = Teal, fontWeight = FontWeight.Bold, fontSize = 11.sp) }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for (index in 0 until attempts.length()) {
+                            val attempt = attempts.getJSONObject(index)
+                            val studentId = attempt.optString("student_id")
+                            TextButton(onClick = { selectedAttemptStudent = studentId }) {
+                                Text(if (studentId == selectedAttemptStudent) "• $studentId" else studentId, color = if (studentId == selectedAttemptStudent) Teal else Muted)
+                            }
+                        }
+                    }
+                }
+            }
+            item { Text("Submitted ${payload.optString("submitted_at")}", color = Muted, fontSize = 11.sp) }
+            result?.let {
+                item {
+                    Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(10.dp)).padding(12.dp)) {
+                        Text("Score ${result.optString("score")}/${result.optString("max_score")} · ${result.optString("test_rating")}/10", color = Teal, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text(result.optString("analysis"), color = Ink, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            }
+            for (index in 0 until paper.length()) {
+                val question = paper.getJSONObject(index)
+                item {
+                    Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(10.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Q${index + 1} · ${question.optString("question_type").uppercase()}", color = Teal, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Text(question.optString("prompt"), color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        val options = question.optJSONArray("options") ?: JSONArray()
+                        val answerValue = selectedStudentAnswers.opt(question.optString("id"))
+                        if (options.length() > 0) {
+                            for (optionIndex in 0 until options.length()) {
+                                val selected = answerValue.toString() == optionIndex.toString()
+                                Text("${('A' + optionIndex).toString()} ${options.getString(optionIndex)}" + if (selected) "  • Selected" else "", color = if (selected) Teal else Ink, fontSize = 11.sp)
+                            }
+                        } else {
+                            Text("Student answer: ${answerValue ?: question.optString("student_answer")}", color = Ink, fontSize = 11.sp)
+                        }
+                        if (question.has("answer_key")) {
+                            Text("Answer key: ${question.opt("answer_key")}", color = Muted, fontSize = 10.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }, confirmButton = { TextButton(onClick = onDismiss) { Text("Close", color = Teal) } })
 }
 
 @Composable

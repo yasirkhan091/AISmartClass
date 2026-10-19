@@ -27,6 +27,11 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
 
     fun myAnalyses(): JSONArray = requestArray("/api/students/me/analyses")
 
+    fun attemptReview(testId: String, studentId: String? = null): JSONObject {
+        val query = studentId?.let { "?student_id=${java.net.URLEncoder.encode(it, "UTF-8")}" } ?: ""
+        return requestJson("/api/tests/$testId/attempts$query", "GET", null)
+    }
+
     fun studentAnalysis(classId: String, studentId: String, asOf: String? = null, subject: String? = null): JSONObject {
         val query = listOfNotNull(
             asOf?.let { "as_of=${java.net.URLEncoder.encode(it, "UTF-8")}" },

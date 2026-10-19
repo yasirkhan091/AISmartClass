@@ -211,6 +211,35 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(len(mock.json()), 1)
         self.assertTrue(mock.json()[0]["is_mock"])
 
+    def test_student_can_review_their_submitted_test(self):
+        test_id, question_ids = self._create_test()
+        self.user = {"id": "student9b001", "name": "Student One", "username": "student9b001", "role": "student", "is_admin": 0}
+        with patch.object(main, "get_structured_test_analysis", return_value=self._fake_analysis()):
+            response = self.client.post(f"/api/tests/{test_id}/attempts", json={"answers": {question_ids[0]: 1, question_ids[1]: "My reasoning works."}})
+        self.assertEqual(response.status_code, 200, response.text)
+
+        review = self.client.get(f"/api/tests/{test_id}/attempts")
+        self.assertEqual(review.status_code, 200, review.text)
+        payload = review.json()
+        self.assertEqual(payload["student_id"], "student9b001")
+        self.assertEqual(payload["answers"][question_ids[0]], 1)
+        self.assertEqual(payload["answers"][question_ids[1]], "My reasoning works.")
+
+    def test_teacher_can_review_student_attempt_answers(self):
+        test_id, question_ids = self._create_test()
+        self.user = {"id": "student9b001", "name": "Student One", "username": "student9b001", "role": "student", "is_admin": 0}
+        with patch.object(main, "get_structured_test_analysis", return_value=self._fake_analysis()):
+            response = self.client.post(f"/api/tests/{test_id}/attempts", json={"answers": {question_ids[0]: 1, question_ids[1]: "My reasoning works."}})
+        self.assertEqual(response.status_code, 200, response.text)
+
+        self.user = {"id": "teacher01", "name": "Teacher One", "username": "teacher01", "role": "teacher", "is_admin": 0}
+        review = self.client.get(f"/api/tests/{test_id}/attempts?student_id=student9b001")
+        self.assertEqual(review.status_code, 200, review.text)
+        payload = review.json()
+        self.assertEqual(payload["student_id"], "student9b001")
+        self.assertEqual(payload["answers"][question_ids[0]], 1)
+        self.assertEqual(payload["answers"][question_ids[1]], "My reasoning works.")
+
     def test_test_creator_and_duration_are_returned_and_teacher_scoped(self):
         test_id, _ = self._create_test()
         with main.closing(main.connect()) as db:
