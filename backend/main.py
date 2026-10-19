@@ -345,7 +345,7 @@ def get_structured_test_analysis(context: str, subjective_max_score: float, metr
     if not api_key:
         raise HTTPException(503, "Configure OPEN_ROUTER_API_KEY to analyse submitted tests")
     primary_model = model_for_provider(provider)
-    fallback_model = os.getenv("OPEN_ROUTER_FALLBACK_MODEL", "openai/gpt-4o-mini").strip()
+    fallback_model = os.getenv("OPEN_ROUTER_FALLBACK_MODEL", "nvidia/nemotron-3-super-120b-a12b:free").strip()
     models = list(dict.fromkeys(model for model in (primary_model, fallback_model) if model))
     instructions = "You are a careful teacher. The input contains JSON. Grade subjective responses only; MCQ points have already been validated. Compare each answer to the answer key and allow equivalent reasoning. Use prior state and metric definitions to assess progress. Return only JSON with subjective_score, test_rating (0-10), analysis, strengths (array), focus_areas (array), advice, subject_rating (0-10), metric_ratings (one object per requested metric with metric_id, rating 0-10, evidence), overall_rating (0-10), and overall_analysis. Never include private cumulative ratings in student advice."
     body = {

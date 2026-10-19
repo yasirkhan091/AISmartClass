@@ -210,6 +210,34 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(models, ["primary-model", "fallback-model"])
         self.assertEqual(result["subjective_score"], 2)
 
+    def test_default_openrouter_fallback_is_verified_free_nvidia_model(self):
+        class FakeResponse:
+            def __init__(self, content):
+                self.content = content
+
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({"choices": [{"message": {"content": self.content}}]}).encode()
+
+        valid = {
+            "subjective_score": 2,
+            "test_rating": 8,
+            "analysis": "The explanation is correct.",
+            "strengths": ["Correct reasoning"],
+            "focus_areas": ["Try a harder example"],
+            "advice": "Continue explaining each step.",
+            "subject_rating": 8,
+            "metric_ratings": [],
+            "overall_rating": 8,
+            "overall_analysis": "A strong result.",
+        }
+        with patch.dict(os.environ, {"AI_PROVIDER": "openrouter", "OPEN_ROUTER_API_KEY": "unit-test-key", "OPEN_ROUTER_MODEL": "primary-model"}, clear=True):
+            with patch("main.urllib.request.urlopen", side_effect=[FakeResponse("not json"), FakeResponse(json.dumps(valid))]) as request:
+                result = main.get_structured_test_analysis("{}", 5, [])
+        models = [json.loads(call.args[0].data)["model"] for call in request.call_args_list]
+        self.assertEqual(models, ["primary-model", "nvidia/nemotron-3-super-120b-a12b:free"])
+        self.assertEqual(result["subjective_score"], 2)
+
     def test_failed_mock_analysis_returns_error_without_saving_attempt(self):
         test_id = "mock-general-knowledge-b"
         self.user = {"id": "student9b001", "name": "Student One", "username": "student9b001", "role": "student", "is_admin": 0}
