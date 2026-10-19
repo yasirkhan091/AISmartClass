@@ -38,6 +38,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -126,6 +127,9 @@ private fun SmartclassRoot(context: Context) {
     var examStartedAtMillis by remember { mutableStateOf(0L) }
     var savedAttemptPending by remember { mutableStateOf(false) }
     var mockRetryAvailable by remember { mutableStateOf(false) }
+    var submissionStage by remember { mutableStateOf("Ready to submit") }
+    var submissionProgress by remember { mutableStateOf(0f) }
+    var showSubmissionResult by remember { mutableStateOf(false) }
     var questions by remember { mutableStateOf<List<DigitalQuestion>>(emptyList()) }
     var result by remember { mutableStateOf<JSONObject?>(null) }
     var report by remember { mutableStateOf<JSONObject?>(null) }
@@ -210,6 +214,9 @@ private fun SmartclassRoot(context: Context) {
     }
     fun submitExam(current: SignedInUser, selected: DigitalTest, currentAnswers: Map<String, String>) {
         mockRetryAvailable = false
+        submissionStage = "Submitting your answers"
+        submissionProgress = 0.05f
+        showSubmissionResult = false
         perform("Could not submit test") {
             val answerJson = JSONObject()
             questions.forEach { question ->
@@ -223,7 +230,8 @@ private fun SmartclassRoot(context: Context) {
                 if (selected.isMock) {
                     activity.runOnUiThread {
                         mockRetryAvailable = true
-                        error = "Analysis did not complete. Your mock answers are still here; tap Retry mock analysis to try again."
+                        submissionStage = "Analysis could not be completed"
+                        error = "The response could not be read or analysis failed. Your answers are still here; tap Retry mock analysis to try again."
                     }
                     return@perform
                 }
@@ -247,6 +255,9 @@ private fun SmartclassRoot(context: Context) {
                 result = response
                 savedAttemptPending = false
                 mockRetryAvailable = false
+                submissionStage = "Analysis complete"
+                submissionProgress = 1f
+                showSubmissionResult = false
             }
         }
     }
@@ -266,6 +277,37 @@ private fun SmartclassRoot(context: Context) {
     }
 
     BackHandler(enabled = result != null) { returnToHome() }
+
+    LaunchedEffect(busy, exam?.id, result) {
+        if (busy && exam != null && result == null) {
+            val stages = listOf(
+                0.18f to "Submitting your answers",
+                0.38f to "AI is reading your answers",
+                0.62f to "Checking responses and answer keys",
+                0.82f to "Preparing your analysis"
+            )
+            for ((target, label) in stages) {
+                delay(1100)
+                if (!busy || result != null) break
+                submissionStage = label
+                submissionProgress = maxOf(submissionProgress, target)
+            }
+            while (busy && result == null && submissionProgress < 0.94f) {
+                delay(700)
+                if (busy && result == null) submissionProgress = (submissionProgress + 0.012f).coerceAtMost(0.94f)
+            }
+        }
+    }
+
+    LaunchedEffect(result) {
+        showSubmissionResult = false
+        if (result != null) {
+            submissionStage = "Analysis complete"
+            submissionProgress = 1f
+            delay(750)
+            showSubmissionResult = true
+        }
+    }
 
     MaterialTheme {
         Surface(color = Paper, modifier = Modifier.fillMaxSize()) {
@@ -291,11 +333,14 @@ private fun SmartclassRoot(context: Context) {
                     readOnly = savedAttemptPending || busy,
                     retryAvailable = mockRetryAvailable,
                     busy = busy,
+                    submissionStage = submissionStage,
+                    submissionProgress = submissionProgress,
                     startedAtMillis = examStartedAtMillis,
                     onAnswer = { id, value -> answers[id] = value },
                     onSubmit = { currentAnswers -> submitExam(current, exam!!, currentAnswers) },
                     onExit = { exam = null; questions = emptyList(); answers.clear(); savedAttemptPending = false }
                 )
+                result != null && !showSubmissionResult -> SubmissionProgressPanel(submissionStage, submissionProgress)
                 result != null -> ResultPanel(result!!, exam?.isMock == true, onHome = ::returnToHome)
                 else -> PortalPanel(
                     user = current,
@@ -733,7 +778,7 @@ private fun TestCard(test: DigitalTest, teacher: Boolean, onOpen: (DigitalTest) 
 }
 
 @Composable
-private fun ExamPanel(test: DigitalTest, questions: List<DigitalQuestion>, answers: Map<String, String>, readOnly: Boolean, retryAvailable: Boolean, busy: Boolean, startedAtMillis: Long, onAnswer: (String, String) -> Unit, onSubmit: (Map<String, String>) -> Unit, onExit: () -> Unit) {
+private fun ExamPanel(test: DigitalTest, questions: List<DigitalQuestion>, answers: Map<String, String>, readOnly: Boolean, retryAvailable: Boolean, busy: Boolean, submissionStage: String, submissionProgress: Float, startedAtMillis: Long, onAnswer: (String, String) -> Unit, onSubmit: (Map<String, String>) -> Unit, onExit: () -> Unit) {
     var remainingSeconds by remember(test.id, startedAtMillis) { mutableStateOf(test.durationMinutes.coerceAtLeast(1) * 60) }
     var autoSubmitted by remember(test.id, startedAtMillis) { mutableStateOf(false) }
     val latestAnswers = rememberUpdatedState(answers)
@@ -754,7 +799,7 @@ private fun ExamPanel(test: DigitalTest, questions: List<DigitalQuestion>, answe
     }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Column { Text(test.subject.uppercase(), color = Teal, fontWeight = FontWeight.Bold, fontSize = 10.sp); Text(test.title, color = Ink, fontSize = 23.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold) }; Column(horizontalAlignment = Alignment.End) { Text("${remainingSeconds / 60}:${(remainingSeconds % 60).toString().padStart(2, '0')}", color = if (remainingSeconds < 60) Coral else Teal, fontWeight = FontWeight.Bold); TextButton(onClick = onExit, enabled = !busy) { Text("Close", color = Teal) } } }
-        if (busy) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(color = Teal, strokeWidth = 2.dp, modifier = Modifier.width(18.dp).height(18.dp)); Text("  Submitting answers and preparing your result...", color = Muted, fontSize = 12.sp) }
+        if (busy) SubmissionProgressPanel(submissionStage, submissionProgress, Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
         LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { Text("${questions.size} questions  ·  ${questions.sumOf { it.points }} points", color = Muted, fontSize = 12.sp) }
             items(questions, key = { it.id }) { question ->
@@ -771,6 +816,30 @@ private fun ExamPanel(test: DigitalTest, questions: List<DigitalQuestion>, answe
             }
             item { Button(onClick = { onSubmit(answers) }, enabled = !busy && questions.isNotEmpty() && (readOnly || questions.all { !answers[it.id].isNullOrBlank() }), modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Teal)) { Text(if (busy) "Submitting..." else if (retryAvailable) "Retry mock analysis" else if (readOnly) "Retry AI analysis" else "Submit test") } }
         }
+    }
+}
+
+@Composable
+private fun SubmissionProgressPanel(stage: String, progress: Float, modifier: Modifier = Modifier) {
+    Column(
+        modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(10.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            if (progress < 1f) CircularProgressIndicator(color = Teal, strokeWidth = 2.dp, modifier = Modifier.width(22.dp).height(22.dp))
+            else Icon(Icons.Default.AssignmentTurnedIn, contentDescription = null, tint = Teal)
+            Column {
+                Text(stage, color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text(if (progress >= 1f) "Your analysis is ready" else "Your answers are being processed", color = Muted, fontSize = 11.sp)
+            }
+        }
+        LinearProgressIndicator(
+            progress = progress.coerceIn(0f, 1f),
+            modifier = Modifier.fillMaxWidth().height(7.dp),
+            color = Teal,
+            trackColor = Color(0xFFE5ECEF)
+        )
+        Text("${(progress.coerceIn(0f, 1f) * 100).toInt()}%", color = Muted, fontSize = 10.sp, modifier = Modifier.align(Alignment.End))
     }
 }
 

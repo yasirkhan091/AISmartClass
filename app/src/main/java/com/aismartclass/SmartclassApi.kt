@@ -1,6 +1,7 @@
 package com.aismartclass
 
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -108,10 +109,18 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
     fun adminSetActive(userId: String, active: Boolean): JSONObject =
         requestJson("/api/admin/users/$userId/active?active=$active", "PATCH", JSONObject())
 
-    private fun requestArray(path: String): JSONArray = JSONArray(String(requestBytes(path, "GET", null, null), Charsets.UTF_8))
+    private fun requestArray(path: String): JSONArray = try {
+        JSONArray(String(requestBytes(path, "GET", null, null), Charsets.UTF_8))
+    } catch (failure: JSONException) {
+        throw IOException("The server returned an invalid response. Please try again.", failure)
+    }
 
     private fun requestJson(path: String, method: String, body: JSONObject?): JSONObject =
-        JSONObject(String(requestBytes(path, method, body?.toString()?.toByteArray(Charsets.UTF_8), if (body == null) null else "application/json"), Charsets.UTF_8))
+        try {
+            JSONObject(String(requestBytes(path, method, body?.toString()?.toByteArray(Charsets.UTF_8), if (body == null) null else "application/json"), Charsets.UTF_8))
+        } catch (failure: JSONException) {
+            throw IOException("The server returned an invalid response. Please try again.", failure)
+        }
 
     private fun requestBytes(path: String, method: String, body: ByteArray?, contentType: String?): ByteArray {
         val connection = (URL("$baseUrl$path").openConnection() as HttpURLConnection).apply {
