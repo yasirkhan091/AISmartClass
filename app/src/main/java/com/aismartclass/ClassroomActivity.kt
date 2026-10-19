@@ -16,13 +16,18 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -30,6 +35,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -44,7 +50,12 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.BarChart
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PersonOutline
+import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.TipsAndUpdates
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,6 +66,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -406,14 +418,59 @@ private fun SmartclassRoot(context: Context) {
 private fun LoginPanel(busy: Boolean, onLogin: (String, String) -> Unit) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxSize().padding(26.dp), verticalArrangement = Arrangement.Center) {
-        Text("AI SMARTCLASS  /  SCHOOL PORTAL", color = Teal, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-        Text("Your classroom,", color = Ink, fontSize = 34.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold)
-        Text("ready when you are.", color = Ink, fontSize = 34.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold)
-        Text("Sign in to view your class work.", color = Muted, modifier = Modifier.padding(top = 8.dp, bottom = 20.dp))
-        OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(password, { password = it }, label = { Text("Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-        Button(onClick = { onLogin(username.trim(), password) }, enabled = !busy && username.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = Teal), modifier = Modifier.fillMaxWidth().padding(top = 15.dp)) { if (busy) CircularProgressIndicator() else Text("Sign in") }
+    var showPassword by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxSize().background(Paper).imePadding(), contentAlignment = Alignment.Center) {
+        Column(
+            Modifier.fillMaxWidth().widthIn(max = 440.dp).verticalScroll(rememberScrollState()).padding(horizontal = 26.dp, vertical = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(Modifier.background(Green, CircleShape).padding(10.dp)) {
+                    Icon(Icons.Default.School, contentDescription = null, tint = Teal)
+                }
+                Column {
+                    Text("AI SMARTCLASS", color = Teal, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Text("SCHOOL PORTAL", color = Muted, fontWeight = FontWeight.Medium, fontSize = 9.sp)
+                }
+            }
+            Spacer(Modifier.height(5.dp))
+            Box(Modifier.width(34.dp).height(4.dp).background(Coral, RoundedCornerShape(2.dp)))
+            Text("Your classroom,\nready when you are.", color = Ink, fontSize = 32.sp, lineHeight = 38.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold)
+            Text("Sign in to continue to your class work.", color = Muted, fontSize = 13.sp)
+            OutlinedTextField(
+                value = username,
+                onValueChange = { username = it },
+                label = { Text("Username") },
+                leadingIcon = { Icon(Icons.Default.PersonOutline, contentDescription = null, tint = Teal) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Password") },
+                leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Teal) },
+                trailingIcon = {
+                    IconButton(onClick = { showPassword = !showPassword }) {
+                        Icon(if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility, contentDescription = if (showPassword) "Hide password" else "Show password", tint = Muted)
+                    }
+                },
+                singleLine = true,
+                visualTransformation = if (showPassword) androidx.compose.ui.text.input.VisualTransformation.None else PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                modifier = Modifier.fillMaxWidth()
+            )
+            Button(
+                onClick = { onLogin(username.trim(), password) },
+                enabled = !busy && username.isNotBlank() && password.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = Teal),
+                modifier = Modifier.fillMaxWidth().height(50.dp),
+                shape = RoundedCornerShape(9.dp)
+            ) {
+                if (busy) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.width(20.dp).height(20.dp))
+                else Text("Sign in", color = Color.White, fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 }
 
@@ -443,7 +500,7 @@ private fun PortalPanel(
     fun classLabel(item: SchoolClass) = if (teacher && item.isClassTeacher) "${item.name} (Class Teacher)" else item.name
     val selectedProgressStudent = ratings.firstOrNull { it.id == progressStudentId } ?: ratings.firstOrNull()
     Column(Modifier.fillMaxSize()) {
-        LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
+        LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             item {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -455,7 +512,17 @@ private fun PortalPanel(
                 }
             }
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) { navItems.forEach { item -> TextButton(onClick = { onPage(item) }) { Text(if (item == page) "• $item" else item, color = if (item == page) Teal else Muted, fontWeight = if (item == page) FontWeight.Bold else FontWeight.Normal) } } }
+                Row(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(10.dp)).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    navItems.forEach { item ->
+                        Box(
+                            Modifier.weight(1f).clip(RoundedCornerShape(7.dp)).background(if (item == page) Teal else Color.Transparent)
+                                .clickable { onPage(item) }.padding(horizontal = 2.dp, vertical = 9.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(item, color = if (item == page) Color.White else Muted, fontSize = 10.sp, fontWeight = if (item == page) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1)
+                        }
+                    }
+                }
             }
             if (busy) item { Row(verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(color = Teal, strokeWidth = 2.dp, modifier = Modifier.width(18.dp).height(18.dp)); Text("  Updating class data...", color = Muted, fontSize = 12.sp) } }
             when (page) {
@@ -826,34 +893,41 @@ private fun RatingTrendChart(title: String, points: List<Pair<String, Float>>) {
         if (points.isEmpty()) {
             BlankState("No ratings in this view", "Choose another subject, rating series, or history window.")
         } else {
-            Canvas(Modifier.fillMaxWidth().height(180.dp).padding(top = 8.dp)) {
-                val left = 18.dp.toPx()
-                val right = size.width - 8.dp.toPx()
-                val top = 8.dp.toPx()
-                val bottom = size.height - 8.dp.toPx()
-                for (step in 0..4) {
-                    val y = bottom - (bottom - top) * step / 4f
-                    drawLine(Color(0xFFE5ECEF), Offset(left, y), Offset(right, y), strokeWidth = 1.dp.toPx())
+            Text("Y-axis · Rating (0–10)", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 8.dp, start = 28.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.height(180.dp).width(28.dp).padding(vertical = 5.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                    listOf("10", "7.5", "5", "2.5", "0").forEach { tick -> Text(tick, color = Muted, fontSize = 9.sp) }
                 }
-                val coords = points.mapIndexed { index, point ->
-                    val x = if (points.size == 1) (left + right) / 2 else left + (right - left) * index / (points.size - 1)
-                    val y = bottom - (bottom - top) * point.second / 10f
-                    Offset(x, y)
-                }
-                if (coords.size > 1) {
-                    val path = Path().apply {
-                        moveTo(coords.first().x, coords.first().y)
-                        coords.drop(1).forEach { lineTo(it.x, it.y) }
+                Canvas(Modifier.weight(1f).height(180.dp)) {
+                    val left = 8.dp.toPx()
+                    val right = size.width - 8.dp.toPx()
+                    val top = 8.dp.toPx()
+                    val bottom = size.height - 8.dp.toPx()
+                    for (step in 0..4) {
+                        val y = bottom - (bottom - top) * step / 4f
+                        drawLine(Color(0xFFE5ECEF), Offset(left, y), Offset(right, y), strokeWidth = 1.dp.toPx())
                     }
-                    drawPath(path, color = Teal, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3.dp.toPx()))
+                    val coords = points.mapIndexed { index, point ->
+                        val x = if (points.size == 1) (left + right) / 2 else left + (right - left) * index / (points.size - 1)
+                        val y = bottom - (bottom - top) * point.second / 10f
+                        Offset(x, y)
+                    }
+                    if (coords.size > 1) {
+                        val path = Path().apply {
+                            moveTo(coords.first().x, coords.first().y)
+                            coords.drop(1).forEach { lineTo(it.x, it.y) }
+                        }
+                        drawPath(path, color = Teal, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3.dp.toPx()))
+                    }
+                    coords.forEach { drawCircle(color = Teal, radius = 4.dp.toPx(), center = it) }
                 }
-                coords.forEach { drawCircle(color = Teal, radius = 4.dp.toPx(), center = it) }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(points.first().first, color = Muted, fontSize = 9.sp)
                 Text("${points.size} assessments", color = Muted, fontSize = 9.sp)
                 Text(points.last().first, color = Muted, fontSize = 9.sp)
             }
+            Text("X-axis · Assessment date", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Medium, modifier = Modifier.align(Alignment.CenterHorizontally))
         }
     }
 }
