@@ -181,6 +181,40 @@ class SchoolApiTests(unittest.TestCase):
                     main.get_structured_test_analysis("{}", 5, [])
             self.assertEqual(unavailable.exception.status_code, 503)
 
+    def test_openrouter_uses_fallback_model_after_invalid_primary_response(self):
+        class FakeResponse:
+            def __init__(self, content):
+                self.content = content
+
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({"choices": [{"message": {"content": self.content}}]}).encode()
+
+        with main.closing(main.connect()) as db:
+            metrics = [dict(row) for row in db.execute("SELECT id FROM teacher_metrics WHERE class_id=? AND subject=? AND retired_at IS NULL", ("class9-b", "Mathematics"))]
+        valid = self._fake_analysis()
+        valid["subjective_score"] = 2
+        responses = [FakeResponse("not json"), FakeResponse(json.dumps(valid))]
+        with patch.dict(os.environ, {"AI_PROVIDER": "openrouter", "OPEN_ROUTER_API_KEY": "unit-test-key", "OPEN_ROUTER_MODEL": "primary-model", "OPEN_ROUTER_FALLBACK_MODEL": "fallback-model"}):
+            with patch("main.urllib.request.urlopen", side_effect=responses) as request:
+                result = main.get_structured_test_analysis("{}", 5, metrics)
+        models = [json.loads(call.args[0].data)["model"] for call in request.call_args_list]
+        self.assertEqual(models, ["primary-model", "fallback-model"])
+        self.assertEqual(result["subjective_score"], 2)
+
+    def test_failed_mock_analysis_returns_error_without_saving_attempt(self):
+        test_id = "mock-general-knowledge-b"
+        self.user = {"id": "student9b001", "name": "Student One", "username": "student9b001", "role": "student", "is_admin": 0}
+        with main.closing(main.connect()) as db:
+            question_ids = [row["id"] for row in db.execute("SELECT id FROM questions WHERE test_id=? ORDER BY position", (test_id,))]
+            attempts_before = db.execute("SELECT COUNT(*) FROM test_attempts WHERE is_mock=1").fetchone()[0]
+        answers = {question_ids[0]: 1, question_ids[1]: "Four", question_ids[2]: 1, question_ids[3]: "Twelve minus five is seven."}
+        with patch.object(main, "get_structured_test_analysis", side_effect=main.HTTPException(503, "unavailable")):
+            response = self.client.post(f"/api/tests/{test_id}/attempts", json={"answers": answers, "is_mock": True})
+        self.assertEqual(response.status_code, 503)
+        with main.closing(main.connect()) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM test_attempts WHERE is_mock=1").fetchone()[0], attempts_before)
+
     def test_timed_submission_accepts_unanswered_questions(self):
         test_id, question_ids = self._create_test()
         self.user = {"id": "student9b001", "name": "Student One", "username": "student9b001", "role": "student", "is_admin": 0}

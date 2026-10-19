@@ -122,6 +122,7 @@ private fun SmartclassRoot(context: Context) {
     var exam by remember { mutableStateOf<DigitalTest?>(null) }
     var examStartedAtMillis by remember { mutableStateOf(0L) }
     var savedAttemptPending by remember { mutableStateOf(false) }
+    var mockRetryAvailable by remember { mutableStateOf(false) }
     var questions by remember { mutableStateOf<List<DigitalQuestion>>(emptyList()) }
     var result by remember { mutableStateOf<JSONObject?>(null) }
     var report by remember { mutableStateOf<JSONObject?>(null) }
@@ -200,20 +201,29 @@ private fun SmartclassRoot(context: Context) {
                 }
             }
             savedAttemptPending = pendingAttempt?.optString("status") == "submitted"
+            mockRetryAvailable = false
             result = null
         }
     }
-    fun submitExam(current: SignedInUser, selected: DigitalTest, currentAnswers: Map<String, String>) = perform("Could not submit test") {
-        val answerJson = JSONObject()
-        questions.forEach { question ->
-            val value = currentAnswers[question.id].orEmpty()
-            if (question.type == "mcq") answerJson.put(question.id, value.toIntOrNull() ?: JSONObject.NULL) else answerJson.put(question.id, value)
-        }
-        val api = SmartclassApi(backendUrl, current.token)
-        val response = try {
-            api.submitTest(selected.id, answerJson, selected.isMock)
-        } catch (failure: Exception) {
-            if (!selected.isMock) {
+    fun submitExam(current: SignedInUser, selected: DigitalTest, currentAnswers: Map<String, String>) {
+        mockRetryAvailable = false
+        perform("Could not submit test") {
+            val answerJson = JSONObject()
+            questions.forEach { question ->
+                val value = currentAnswers[question.id].orEmpty()
+                if (question.type == "mcq") answerJson.put(question.id, value.toIntOrNull() ?: JSONObject.NULL) else answerJson.put(question.id, value)
+            }
+            val api = SmartclassApi(backendUrl, current.token)
+            val response = try {
+                api.submitTest(selected.id, answerJson, selected.isMock)
+            } catch (failure: Exception) {
+                if (selected.isMock) {
+                    activity.runOnUiThread {
+                        mockRetryAvailable = true
+                        error = "Analysis did not complete. Your mock answers are still here; tap Retry mock analysis to try again."
+                    }
+                    return@perform
+                }
                 val saved = api.digitalTest(selected.id).optJSONObject("my_attempt")
                 if (saved?.optString("status") == "submitted") {
                     val savedAnswers = saved.getJSONObject("answers")
@@ -227,13 +237,14 @@ private fun SmartclassRoot(context: Context) {
                         savedAttemptPending = true
                     }
                 }
+                throw failure
             }
-            throw failure
-        }
-        if (!selected.isMock) refresh(current, selectedClassId)
-        activity.runOnUiThread {
-            result = response
-            savedAttemptPending = false
+            if (!selected.isMock) refresh(current, selectedClassId)
+            activity.runOnUiThread {
+                result = response
+                savedAttemptPending = false
+                mockRetryAvailable = false
+            }
         }
     }
     fun openStudentReport(item: StudentRating, current: SignedInUser, asOf: String? = null, subject: String? = null) = perform("Could not open student analysis") {
@@ -264,6 +275,7 @@ private fun SmartclassRoot(context: Context) {
                     questions = questions,
                     answers = answers,
                     readOnly = savedAttemptPending || busy,
+                    retryAvailable = mockRetryAvailable,
                     busy = busy,
                     startedAtMillis = examStartedAtMillis,
                     onAnswer = { id, value -> answers[id] = value },
@@ -709,7 +721,7 @@ private fun TestCard(test: DigitalTest, teacher: Boolean, onOpen: (DigitalTest) 
 }
 
 @Composable
-private fun ExamPanel(test: DigitalTest, questions: List<DigitalQuestion>, answers: Map<String, String>, readOnly: Boolean, busy: Boolean, startedAtMillis: Long, onAnswer: (String, String) -> Unit, onSubmit: (Map<String, String>) -> Unit, onExit: () -> Unit) {
+private fun ExamPanel(test: DigitalTest, questions: List<DigitalQuestion>, answers: Map<String, String>, readOnly: Boolean, retryAvailable: Boolean, busy: Boolean, startedAtMillis: Long, onAnswer: (String, String) -> Unit, onSubmit: (Map<String, String>) -> Unit, onExit: () -> Unit) {
     var remainingSeconds by remember(test.id, startedAtMillis) { mutableStateOf(test.durationMinutes.coerceAtLeast(1) * 60) }
     var autoSubmitted by remember(test.id, startedAtMillis) { mutableStateOf(false) }
     val latestAnswers = rememberUpdatedState(answers)
@@ -745,7 +757,7 @@ private fun ExamPanel(test: DigitalTest, questions: List<DigitalQuestion>, answe
                     } else OutlinedTextField(answers[question.id].orEmpty(), { onAnswer(question.id, it) }, readOnly = readOnly, label = { Text("Your answer") }, minLines = 3, modifier = Modifier.fillMaxWidth())
                 }
             }
-            item { Button(onClick = { onSubmit(answers) }, enabled = !busy && questions.isNotEmpty() && (readOnly || questions.all { !answers[it.id].isNullOrBlank() }), modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Teal)) { Text(if (busy) "Submitting..." else if (readOnly) "Retry AI analysis" else "Submit test") } }
+            item { Button(onClick = { onSubmit(answers) }, enabled = !busy && questions.isNotEmpty() && (readOnly || questions.all { !answers[it.id].isNullOrBlank() }), modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Teal)) { Text(if (busy) "Submitting..." else if (retryAvailable) "Retry mock analysis" else if (readOnly) "Retry AI analysis" else "Submit test") } }
         }
     }
 }

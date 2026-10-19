@@ -319,10 +319,11 @@ def get_structured_test_analysis(context: str, subjective_max_score: float, metr
     api_key = os.getenv("OPEN_ROUTER_API_KEY")
     if not api_key:
         raise HTTPException(503, "Configure OPEN_ROUTER_API_KEY to analyse submitted tests")
-    model = model_for_provider(provider)
+    primary_model = model_for_provider(provider)
+    fallback_model = os.getenv("OPEN_ROUTER_FALLBACK_MODEL", "openai/gpt-4o-mini").strip()
+    models = list(dict.fromkeys(model for model in (primary_model, fallback_model) if model))
     instructions = "You are a careful teacher. The input contains JSON. Grade subjective responses only; MCQ points have already been validated. Compare each answer to the answer key and allow equivalent reasoning. Use prior state and metric definitions to assess progress. Return only JSON with subjective_score, test_rating (0-10), analysis, strengths (array), focus_areas (array), advice, subject_rating (0-10), metric_ratings (one object per requested metric with metric_id, rating 0-10, evidence), overall_rating (0-10), and overall_analysis. Never include private cumulative ratings in student advice."
     body = {
-        "model": model,
         "messages": [
             {"role": "system", "content": instructions},
             {"role": "user", "content": "Return a json object matching required_output. Assessment context:\n" + context},
@@ -336,24 +337,31 @@ def get_structured_test_analysis(context: str, subjective_max_score: float, metr
         "HTTP-Referer": "https://ais-smartclass-api.onrender.com",
         "X-Title": "AI Smartclass",
     }
-    request = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=150) as response:
-            payload = json.loads(response.read())
-        text = payload["choices"][0]["message"]["content"]
-        result = json.loads(text)
-        return validate_analysis_result(result, subjective_max_score, metrics)
-    except urllib.error.HTTPError as error:
-        if error.code in (402, 429):
-            raise HTTPException(402, "OpenRouter quota or credit limit reached; submitted answers are saved for retry.") from error
-        if error.code >= 500:
-            raise HTTPException(503, "OpenRouter is temporarily unavailable; submitted answers are saved for retry.") from error
-        raise HTTPException(502, "OpenRouter analysis request failed; check backend logs.") from error
-    except (urllib.error.URLError, TimeoutError) as error:
-        raise HTTPException(503, "OpenRouter is temporarily unavailable; submitted answers are saved for retry.") from error
-    except (json.JSONDecodeError, ValueError, KeyError, TypeError) as error:
-        logger.warning("OpenRouter returned an invalid structured analysis")
-        raise HTTPException(502, "OpenRouter returned invalid analysis; submitted answers are saved for retry.") from error
+    last_error = None
+    last_status = None
+    for model in models:
+        body["model"] = model
+        request = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=35) as response:
+                payload = json.loads(response.read())
+            text = payload["choices"][0]["message"]["content"]
+            result = json.loads(text)
+            return validate_analysis_result(result, subjective_max_score, metrics)
+        except urllib.error.HTTPError as error:
+            if error.code == 402:
+                raise HTTPException(402, "OpenRouter quota or credit limit reached; submitted answers are saved for retry.") from error
+            if error.code in (401, 403):
+                raise HTTPException(502, "OpenRouter rejected the analysis request; check the configured credentials and model access.") from error
+            last_error = error
+            last_status = error.code
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError, KeyError, TypeError) as error:
+            last_error = error
+            last_status = None
+    logger.warning("OpenRouter analysis failed for primary and fallback models")
+    if last_status == 429 or (last_status is not None and last_status >= 500) or isinstance(last_error, (urllib.error.URLError, TimeoutError)):
+        raise HTTPException(503, "OpenRouter analysis is temporarily unavailable after the fallback attempt.") from last_error
+    raise HTTPException(502, "OpenRouter returned invalid analysis after the fallback attempt.") from last_error
 
 
 @app.get("/api/health")
