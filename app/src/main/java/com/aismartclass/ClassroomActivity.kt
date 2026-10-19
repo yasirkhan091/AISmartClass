@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -56,6 +58,7 @@ import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.TipsAndUpdates
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -252,6 +255,17 @@ private fun SmartclassRoot(context: Context) {
         val isClassTeacher = current.isAdmin || current.classes.firstOrNull { it.id == selectedClassId }?.isClassTeacher == true
         activity.runOnUiThread { reportStudent = item; report = response; reportIsClassTeacher = isClassTeacher }
     }
+    fun returnToHome() {
+        result = null
+        exam = null
+        questions = emptyList()
+        answers.clear()
+        savedAttemptPending = false
+        mockRetryAvailable = false
+        page = "Tests"
+    }
+
+    BackHandler(enabled = result != null) { returnToHome() }
 
     MaterialTheme {
         Surface(color = Paper, modifier = Modifier.fillMaxSize()) {
@@ -282,9 +296,7 @@ private fun SmartclassRoot(context: Context) {
                     onSubmit = { currentAnswers -> submitExam(current, exam!!, currentAnswers) },
                     onExit = { exam = null; questions = emptyList(); answers.clear(); savedAttemptPending = false }
                 )
-                result != null -> ResultPanel(result!!, exam?.isMock == true, onDone = {
-                    result = null; exam = null; questions = emptyList(); answers.clear(); savedAttemptPending = false; page = if (student) "Results" else "Tests"
-                })
+                result != null -> ResultPanel(result!!, exam?.isMock == true, onHome = ::returnToHome)
                 else -> PortalPanel(
                     user = current,
                     activeClass = activeClass,
@@ -763,20 +775,35 @@ private fun ExamPanel(test: DigitalTest, questions: List<DigitalQuestion>, answe
 }
 
 @Composable
-private fun ResultPanel(result: JSONObject, mock: Boolean, onDone: () -> Unit) {
+private fun ResultPanel(result: JSONObject, mock: Boolean, onHome: () -> Unit) {
     val score = result.optDouble("score")
     val maxScore = result.optDouble("max_score")
-    Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(if (mock) "Practice complete" else "Test complete", color = Teal, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-        Text("${score.toInt()} / ${maxScore.toInt()}", color = Ink, fontSize = 36.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold)
-        if (result.has("test_rating")) Text("Test rating: ${result.optDouble("test_rating").toInt()} / 10", color = Teal, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-        Text(result.optString("analysis"), color = Ink, fontSize = 14.sp, lineHeight = 20.sp)
-        Text("Advice", color = Teal, fontWeight = FontWeight.Bold)
-        Text(result.optString("advice"), color = Ink, fontSize = 13.sp, lineHeight = 19.sp)
-        result.optJSONArray("strengths")?.let { Text("Strengths: ${stringList(it).joinToString()}", color = Muted, fontSize = 12.sp) }
-        result.optJSONArray("focus_areas")?.let { Text("Focus next: ${stringList(it).joinToString()}", color = Muted, fontSize = 12.sp) }
-        Spacer(Modifier.height(4.dp))
-        ActionButton("Done", onDone)
+    Column(Modifier.fillMaxSize()) {
+        LazyColumn(
+            Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item { Text(if (mock) "Practice complete" else "Test complete", color = Teal, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+            item { Text("${score.toInt()} / ${maxScore.toInt()}", color = Ink, fontSize = 36.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold) }
+            if (result.has("test_rating")) item { Text("Test rating: ${result.optDouble("test_rating").toInt()} / 10", color = Teal, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+            item { Text(result.optString("analysis"), color = Ink, fontSize = 14.sp, lineHeight = 20.sp) }
+            item { Text("Advice", color = Teal, fontWeight = FontWeight.Bold) }
+            item { Text(result.optString("advice"), color = Ink, fontSize = 13.sp, lineHeight = 19.sp) }
+            result.optJSONArray("strengths")?.let { item { Text("Strengths: ${stringList(it).joinToString()}", color = Muted, fontSize = 12.sp) } }
+            result.optJSONArray("focus_areas")?.let { item { Text("Focus next: ${stringList(it).joinToString()}", color = Muted, fontSize = 12.sp) } }
+        }
+        Surface(color = Color.White, shadowElevation = 6.dp) {
+            Button(
+                onClick = onHome,
+                modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 18.dp, vertical = 12.dp).height(50.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Teal),
+                shape = RoundedCornerShape(9.dp)
+            ) {
+                Icon(Icons.Default.Home, contentDescription = null, tint = Color.White)
+                Text("  Back to home", color = Color.White, fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 }
 
