@@ -130,11 +130,56 @@ SUBJECT_ADVICE_TEMPLATES = (
     "Keep a brief list of challenging questions and revisit them after a few days.",
     "Use worked examples to check understanding, then solve a similar problem independently.",
 )
+SUBJECT_FEEDBACK = {
+    "Mathematics": ("setting up equations", "checking calculations", "showing each transformation"),
+    "English": ("supporting ideas with evidence", "sentence structure", "verb tense and punctuation"),
+    "Hindi": ("vocabulary in context", "sentence formation", "written accuracy"),
+    "Physics": ("choosing the right relationship", "including units", "explaining cause and effect"),
+    "Chemistry": ("using scientific terms", "classifying changes", "explaining each process"),
+    "Biology": ("linking structure to function", "using precise terms", "explaining relationships"),
+    "History": ("using evidence to support claims", "placing events in context", "explaining cause and consequence"),
+    "Geography": ("reading information carefully", "using geographical terms", "connecting processes to outcomes"),
+    "Computer Science": ("breaking tasks into steps", "checking input and output", "explaining the logic"),
+    "Art": ("describing visual choices", "using colour vocabulary", "explaining how technique affects the result"),
+    "General Knowledge": ("checking details before answering", "explaining the reasoning", "connecting facts to the question"),
+}
 
 
 def _varied_template(templates, key: str) -> str:
     index = sum((position + 1) * ord(character) for position, character in enumerate(key)) % len(templates)
     return templates[index]
+
+
+def seeded_test_feedback(subject: str, rating: float, key: str) -> dict:
+    skill = _varied_template(SUBJECT_FEEDBACK.get(subject, SUBJECT_FEEDBACK["General Knowledge"]), key)
+    if rating >= 8:
+        return {
+            "analysis": f"Responses show a secure understanding of {subject}. The student applied ideas about {skill} accurately and gave clear explanations on most questions.",
+            "strengths": [f"Accurate {subject} concepts", "Clear explanations"],
+            "focus_areas": [f"Extend {skill} to unfamiliar questions"],
+            "advice": f"Try one more challenging {subject} problem and explain why the chosen method works, not only the final answer.",
+        }
+    if rating >= 6.5:
+        return {
+            "analysis": f"The student understands several core {subject} ideas and made progress with {skill}. Some responses would be stronger with more precise reasoning and a final check.",
+            "strengths": ["Recall of key ideas", "Progress on familiar questions"],
+            "focus_areas": [f"Practise {skill}", "Check the final response against the question"],
+            "advice": f"Review one worked {subject} example, then attempt a similar question independently and write out the reasoning step by step.",
+        }
+    return {
+        "analysis": f"The responses show developing understanding of {subject}. The student recognised some relevant ideas, but needs more guided practice with {skill} before applying them consistently.",
+        "strengths": ["Engagement with the questions", "Some relevant subject knowledge"],
+        "focus_areas": [f"Revisit {skill}", "Build answers in small, checkable steps"],
+        "advice": f"Revisit the class notes on {subject}, work through one example with support, then retry a similar question without looking at the solution.",
+    }
+
+
+def seeded_metric_evidence(name: str, rating: float) -> str:
+    if rating >= 8:
+        return f"The student showed consistent {name.lower()} across most responses."
+    if rating >= 6:
+        return f"The student showed {name.lower()} in familiar questions; consistency is still developing."
+    return f"Responses indicate that {name.lower()} needs deliberate practice with guided examples."
 
 
 def subject_analysis(subject: str, student_id: str, rating: float) -> dict:
@@ -287,11 +332,13 @@ def _refresh_seeded_data(db, password_digest, admin_username, admin_password, sa
         result = json.loads(row["result_json"])
         rating = float(result.get("test_rating", 5))
         metric_ratings = [
-            {"metric_id": metric["id"], "rating": round(max(0, min(10, rating + (index - 2) * 0.25)), 1), "evidence": f"Evidence for {metric['name'].lower()} in this assessment."}
+            {"metric_id": metric["id"], "rating": round(max(0, min(10, rating + (index - 2) * 0.25)), 1)}
             for index, metric in enumerate(metrics_by_subject[(row["class_id"], row["subject"])])
         ]
         result["metric_ratings"] = metric_ratings
-        result["analysis"] = f"The student demonstrated {row['subject'].lower()} knowledge with improving accuracy."
+        result.update(seeded_test_feedback(row["subject"], rating, row["id"]))
+        for metric, metric_rating in zip(metrics_by_subject[(row["class_id"], row["subject"])], metric_ratings):
+            metric_rating["evidence"] = seeded_metric_evidence(metric["name"], metric_rating["rating"])
         analysis_updates.append((json.dumps(result), row["id"]))
         results_by_attempt[(row["test_id"], row["student_id"])] = {
             "metrics": metric_ratings,
@@ -414,7 +461,7 @@ def seed_school_data(db, password_digest, student_password: str, teacher_passwor
                 for question_index, (kind, prompt, options, key, _) in enumerate(questions_for(subject), start=1):
                     question_id = f"{test_id}-q{question_index}"
                     question_rows.append((question_id, test_id, prompt, 2.5, kind, json.dumps(options), json.dumps(key), question_index))
-                    questions.append({"id": question_id, "question_type": kind, "points": 2.5, "answer_key": key})
+                    questions.append({"id": question_id, "question_type": kind, "points": 2.5, "answer_key": key, "options": options})
                 seeded_tests += 1
 
                 for student_id, _, student_index in students_by_class[class_id]:
@@ -433,24 +480,30 @@ def seed_school_data(db, password_digest, student_password: str, teacher_passwor
                     overall_rating = round(sum(subject_ratings_by_student[student_id].values()) / len(subject_ratings_by_student[student_id]), 1)
                     overall_text = overall_analysis(student_id, overall_rating)
                     score = round(test_rating, 1)
-                    answers = {
-                        questions[0]["id"]: 1 if student_index % 5 else 0,
-                        questions[1]["id"]: 2 if student_index % 4 else 1,
-                        questions[2]["id"]: "A clear explanation with a relevant example.",
-                        questions[3]["id"]: "I showed the steps and checked the conclusion.",
-                    }
+                    answers = {}
+                    for question_index, question in enumerate(questions):
+                        answer_key = question["answer_key"]
+                        if question["question_type"] == "mcq":
+                            is_correct = (student_index + test_number + subject_index + question_index) % 4 != 0
+                            if is_correct:
+                                answers[question["id"]] = answer_key
+                            else:
+                                option_count = len(question["options"])
+                                answers[question["id"]] = (answer_key + 1 + student_index % (option_count - 1)) % option_count
+                        elif (student_index + test_number + question_index) % 3:
+                            answers[question["id"]] = answer_key
+                        else:
+                            answers[question["id"]] = f"I identified the main idea, but need to explain it more clearly: {answer_key}"
                     attempt_id = f"attempt-{test_id}-{student_id}"
                     timestamp = f"{exam_date}T08:{subject_index * 5:02d}:00+00:00"
+                    feedback = seeded_test_feedback(subject, test_rating, attempt_id)
                     result = {
                         "score": score,
                         "max_score": 10,
                         "test_rating": test_rating,
-                        "analysis": f"{student_id} demonstrated {subject.lower()} knowledge with improving accuracy.",
-                        "strengths": ["Concept recall", "Attempt completion"],
-                        "focus_areas": ["Show reasoning clearly"],
-                        "advice": "Write each step and check the final result against the question.",
+                        **feedback,
                         "subject_rating": subject_rating,
-                        "metric_ratings": [{"metric_id": metric_id, "rating": rating, "evidence": "Generated sample evidence for this assessment."} for metric_id, rating in metric_ratings.items()],
+                        "metric_ratings": [{"metric_id": metric_id, "rating": rating, "evidence": seeded_metric_evidence(next(metric["name"] for metric in metric_rows if metric["id"] == metric_id), rating)} for metric_id, rating in metric_ratings.items()],
                         "overall_rating": overall_rating,
                         "overall_analysis": overall_text,
                         "question_results": [],

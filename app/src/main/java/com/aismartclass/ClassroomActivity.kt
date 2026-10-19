@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +29,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -35,6 +37,14 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.AssignmentTurnedIn
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.ShowChart
+import androidx.compose.material.icons.filled.BarChart
+import androidx.compose.material.icons.filled.TipsAndUpdates
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -45,8 +55,10 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -103,6 +115,9 @@ private fun SmartclassRoot(context: Context) {
     var report by remember { mutableStateOf<JSONObject?>(null) }
     var reportStudent by remember { mutableStateOf<StudentRating?>(null) }
     var reportIsClassTeacher by remember { mutableStateOf(false) }
+    var progressReport by remember { mutableStateOf<JSONObject?>(null) }
+    var progressReportStudent by remember { mutableStateOf<StudentRating?>(null) }
+    var progressReportClassId by remember { mutableStateOf("") }
     var reviewAttempt by remember { mutableStateOf<JSONObject?>(null) }
     var reviewTitle by remember { mutableStateOf("") }
     var showBuilder by remember { mutableStateOf(false) }
@@ -113,6 +128,7 @@ private fun SmartclassRoot(context: Context) {
     val tests = remember { mutableStateListOf<DigitalTest>() }
     val analyses = remember { mutableStateListOf<TestAnalysis>() }
     val ratings = remember { mutableStateListOf<StudentRating>() }
+    var ratingsClassId by remember { mutableStateOf("") }
     val teacherMetrics = remember { mutableStateListOf<JSONObject>() }
     val adminUsers = remember { mutableStateListOf<JSONObject>() }
     val answers = remember { mutableStateMapOf<String, String>() }
@@ -149,6 +165,7 @@ private fun SmartclassRoot(context: Context) {
             tests.clear(); tests.addAll(newTests)
             analyses.clear(); analyses.addAll(newAnalyses)
             ratings.clear(); ratings.addAll(newRatings)
+            ratingsClassId = classId
             teacherMetrics.clear(); teacherMetrics.addAll(newMetrics)
             adminUsers.clear(); adminUsers.addAll(newAdminUsers)
         }
@@ -255,9 +272,22 @@ private fun SmartclassRoot(context: Context) {
                     ratings = ratings,
                     metrics = teacherMetrics,
                     adminUsers = adminUsers,
+                    progressReport = progressReport,
+                    progressReportStudentId = progressReportStudent?.id,
+                    progressReportClassId = progressReportClassId,
+                    ratingsClassId = ratingsClassId,
                     onClass = { selectedClassId = it; val selected = current.classes.firstOrNull { item -> item.id == it }; if (selected != null) perform("Could not refresh class") { refresh(current, selected.id) } },
                     onPage = { page = it },
-                    onLogout = { user = null; tests.clear(); analyses.clear(); ratings.clear() },
+                    onLogout = { user = null; tests.clear(); analyses.clear(); ratings.clear(); progressReport = null; progressReportStudent = null },
+                    onProgress = { item ->
+                        progressReport = null
+                        progressReportStudent = item
+                        progressReportClassId = selectedClassId
+                        perform("Could not load student progress") {
+                            val payload = SmartclassApi(backendUrl, current.token).studentAnalysis(selectedClassId, item.id)
+                            activity.runOnUiThread { progressReport = payload }
+                        }
+                    },
                     onOpenTest = { openExam(it, current) },
                     onReviewAttempt = { test ->
                         perform("Could not load your test review") {
@@ -391,23 +421,27 @@ private fun LoginPanel(busy: Boolean, onLogin: (String, String) -> Unit) {
 private fun PortalPanel(
     user: SignedInUser, activeClass: SchoolClass?, classes: List<SchoolClass>, page: String, busy: Boolean,
     tests: List<DigitalTest>, analyses: List<TestAnalysis>, ratings: List<StudentRating>, metrics: List<JSONObject>, adminUsers: List<JSONObject>,
+    progressReport: JSONObject?, progressReportStudentId: String?, progressReportClassId: String, ratingsClassId: String,
     onClass: (String) -> Unit, onPage: (String) -> Unit, onLogout: () -> Unit,
+    onProgress: (StudentRating) -> Unit,
     onOpenTest: (DigitalTest) -> Unit, onReviewAttempt: (DigitalTest) -> Unit, onOpenBuilder: () -> Unit, onEditTest: (DigitalTest) -> Unit, onDeleteTest: (DigitalTest) -> Unit,
     onReport: (StudentRating, String?) -> Unit, onReviewStudentAttempt: (DigitalTest, String) -> Unit, onAddStudent: () -> Unit, onAddTeacher: () -> Unit,
     onEditUser: (JSONObject) -> Unit, onDeleteUser: (JSONObject) -> Unit, onCreateMetric: () -> Unit
 ) {
     val admin = user.isAdmin
     val teacher = user.role == "teacher" && !admin
-    val navItems = if (admin) listOf("Admin", "Profile") else if (teacher) listOf("Tests", "Class", "Metrics", "Profile") else listOf("Tests", "Results", "Mock", "Profile")
+    val navItems = if (admin) listOf("Admin", "Profile") else if (teacher) listOf("Tests", "Class", "Progress", "Metrics", "Profile") else listOf("Tests", "Results", "Mock", "Profile")
     var testSubject by remember(user.id, activeClass?.id) { mutableStateOf("") }
     var resultSubject by remember(user.id, activeClass?.id) { mutableStateOf("") }
     var mockSubject by remember(user.id, activeClass?.id) { mutableStateOf("") }
     var classSubject by remember(user.id, activeClass?.id) { mutableStateOf("") }
+    var progressStudentId by remember(user.id, activeClass?.id) { mutableStateOf("") }
     var adminClassFilter by remember(user.id) { mutableStateOf("All classes") }
     var adminRoleFilter by remember(user.id) { mutableStateOf("All roles") }
     var pendingDeleteUser by remember { mutableStateOf<JSONObject?>(null) }
     var pendingDeleteTest by remember { mutableStateOf<DigitalTest?>(null) }
     fun classLabel(item: SchoolClass) = if (teacher && item.isClassTeacher) "${item.name} (Class Teacher)" else item.name
+    val selectedProgressStudent = ratings.firstOrNull { it.id == progressStudentId } ?: ratings.firstOrNull()
     Column(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
             item {
@@ -448,6 +482,43 @@ private fun PortalPanel(
                     if (subjectOnlyClass && classSubjectOptions.size > 1) item { ChoiceDropdown("Subject", selectedClassSubject.ifBlank { "Select subject" }, classSubjectOptions, { classSubject = it }) }
                     if (ratings.isEmpty()) item { BlankState("No class ratings", "Ratings appear as assessments are completed.") }
                     items(ratings) { item -> RatingCard(item, selectedClassSubject.takeIf { subjectOnlyClass }) { onReport(item, selectedClassSubject.takeIf { subjectOnlyClass }) } }
+                }
+                "Progress" -> {
+                    item { ChoiceDropdown("Class", activeClass?.let(::classLabel).orEmpty(), classes.map(::classLabel), { selected -> classes.firstOrNull { classLabel(it) == selected }?.let { onClass(it.id) } }) }
+                    item { Heading("Student progress", "ASSESSMENT TRENDS") }
+                    if (ratingsClassId != activeClass?.id) {
+                        item { BlankState("Loading class roster", "Student choices update when the selected class finishes loading.") }
+                    } else if (ratings.isEmpty()) {
+                        item { BlankState("No student data yet", "Progress charts appear after students complete analyzed assessments.") }
+                    } else {
+                        item {
+                            ChoiceDropdown("Student", selectedProgressStudent?.name.orEmpty(), ratings.map { it.name }) { name ->
+                                progressStudentId = ratings.firstOrNull { it.name == name }?.id.orEmpty()
+                            }
+                        }
+                        item {
+                            Button(onClick = { selectedProgressStudent?.let(onProgress) }, enabled = !busy && ratingsClassId == activeClass?.id && selectedProgressStudent != null, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Teal), shape = RoundedCornerShape(8.dp)) {
+                                Icon(Icons.Default.ShowChart, contentDescription = null, tint = Color.White)
+                                Text(if (busy) "  Loading progress..." else "  View progress", color = Color.White)
+                            }
+                        }
+                        if (selectedProgressStudent != null) {
+                            val visibleReport = progressReport.takeIf {
+                                progressReportStudentId == selectedProgressStudent.id && progressReportClassId == activeClass?.id
+                            }
+                            if (visibleReport == null) {
+                                item { BlankState("Loading progress", "Preparing ${selectedProgressStudent.name}'s assessment history.") }
+                            } else {
+                                item {
+                                    StudentProgressDashboard(
+                                        report = visibleReport,
+                                        student = selectedProgressStudent,
+                                        isClassTeacher = activeClass?.isClassTeacher == true,
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
                 "Metrics" -> {
                     if (teacher) item { ChoiceDropdown("Class", activeClass?.let(::classLabel).orEmpty(), classes.map(::classLabel), { selected -> classes.firstOrNull { classLabel(it) == selected }?.let { onClass(it.id) } }) }
@@ -662,6 +733,153 @@ private fun RatingCard(item: StudentRating, subjectFilter: String? = null, onCli
 }
 
 @Composable
+private fun StudentProgressDashboard(report: JSONObject, student: StudentRating, isClassTeacher: Boolean) {
+    val tests = report.optJSONArray("tests") ?: JSONArray()
+    val subjectRatings = report.optJSONObject("subject_ratings") ?: JSONObject()
+    val metricRatings = report.optJSONObject("metric_ratings") ?: JSONObject()
+    val testSubjects = (0 until tests.length()).map { tests.getJSONObject(it).optString("subject") }.filter(String::isNotBlank)
+    val subjectOptions = listOf("All subjects") + (subjectRatings.keys().asSequence().toList() + testSubjects).distinct().sorted()
+    val allMetrics = metricRatings.keys().asSequence().mapNotNull { id ->
+        metricRatings.optJSONObject(id)?.let { JSONObject().put("id", id).put("name", it.optString("name")).put("subject", it.optString("subject")) }
+    }.toList()
+    var selectedSubject by remember(student.id) { mutableStateOf("All subjects") }
+    var selectedMeasure by remember(student.id) { mutableStateOf("Test rating") }
+    var selectedMetricId by remember(student.id) { mutableStateOf("") }
+    var selectedWindow by remember(student.id) { mutableStateOf("All assessments") }
+    val visibleMetrics = allMetrics.filter { selectedSubject == "All subjects" || it.optString("subject") == selectedSubject }
+    val selectedMetric = visibleMetrics.firstOrNull { it.optString("id") == selectedMetricId } ?: visibleMetrics.firstOrNull()
+    val measures = buildList {
+        add("Test rating")
+        add("Subject rating")
+        if (isClassTeacher) add("Overall rating")
+        if (visibleMetrics.isNotEmpty()) add("Metric rating")
+    }
+    val activeMeasure = selectedMeasure.takeIf { it in measures } ?: measures.first()
+    val filteredTests = (0 until tests.length()).map { tests.getJSONObject(it) }
+        .filter { selectedSubject == "All subjects" || it.optString("subject") == selectedSubject }
+        .sortedBy { it.optString("date") }
+    val windowedTests = when (selectedWindow) {
+        "Most recent 3" -> filteredTests.takeLast(3)
+        "Most recent 6" -> filteredTests.takeLast(6)
+        else -> filteredTests
+    }
+    val trend = windowedTests.mapNotNull { test ->
+        val result = test.optJSONObject("result") ?: JSONObject()
+        val rating = when (activeMeasure) {
+            "Subject rating" -> result.optDouble("subject_rating", Double.NaN)
+            "Overall rating" -> result.optDouble("overall_rating", Double.NaN)
+            "Metric rating" -> {
+                val metricArray = result.optJSONArray("metric_ratings") ?: JSONArray()
+                (0 until metricArray.length()).firstNotNullOfOrNull { index ->
+                    metricArray.getJSONObject(index).takeIf { it.optString("metric_id") == selectedMetric?.optString("id") }
+                        ?.optDouble("rating", Double.NaN)?.takeUnless(Double::isNaN)
+                } ?: Double.NaN
+            }
+            else -> result.optDouble("test_rating", Double.NaN)
+        }
+        if (rating.isNaN()) null else test.optString("date").takeLast(10) to rating.toFloat().coerceIn(0f, 10f)
+    }
+    val displayedSubjectRatings = subjectRatings.keys().asSequence()
+        .filter { selectedSubject == "All subjects" || it == selectedSubject }
+        .map { it to subjectRatings.optDouble(it).toFloat().coerceIn(0f, 10f) }
+        .sortedBy { it.first }
+        .toList()
+    val latest = trend.lastOrNull()?.second
+    val change = if (trend.size > 1) trend.last().second - trend.first().second else null
+
+    Column(verticalArrangement = Arrangement.spacedBy(11.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.BarChart, contentDescription = null, tint = Teal)
+            Text("  ${student.name}", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+        }
+        ChoiceDropdown("Subject", selectedSubject, subjectOptions) { selectedSubject = it }
+        ChoiceDropdown("Rating series", activeMeasure, measures) { selectedMeasure = it }
+        if (activeMeasure == "Metric rating" && selectedMetric != null) {
+            ChoiceDropdown("Teacher metric", selectedMetric.optString("name"), visibleMetrics.map { it.optString("name") }) { name ->
+                selectedMetricId = visibleMetrics.firstOrNull { it.optString("name") == name }?.optString("id").orEmpty()
+            }
+        }
+        ChoiceDropdown("History window", selectedWindow, listOf("All assessments", "Most recent 6", "Most recent 3")) { selectedWindow = it }
+        Row(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(8.dp)).padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column {
+                Text("LATEST ${activeMeasure.uppercase()}", color = Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                Text(latest?.let { String.format("%.1f / 10", it) } ?: "Not available", color = Ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text("CHANGE IN WINDOW", color = Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                Text(change?.let { String.format("%+.1f points", it) } ?: "Need 2 results", color = if ((change ?: 0f) >= 0f) Teal else Coral, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        RatingTrendChart(title = activeMeasure + if (activeMeasure == "Metric rating" && selectedMetric != null) " · ${selectedMetric.optString("name")}" else "", points = trend)
+        SubjectRatingBars(displayedSubjectRatings)
+    }
+}
+
+@Composable
+private fun RatingTrendChart(title: String, points: List<Pair<String, Float>>) {
+    Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(8.dp)).padding(13.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.ShowChart, contentDescription = null, tint = Teal)
+            Text("  $title", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
+        Text("Rating out of 10", color = Muted, fontSize = 10.sp, modifier = Modifier.padding(top = 2.dp))
+        if (points.isEmpty()) {
+            BlankState("No ratings in this view", "Choose another subject, rating series, or history window.")
+        } else {
+            Canvas(Modifier.fillMaxWidth().height(180.dp).padding(top = 8.dp)) {
+                val left = 18.dp.toPx()
+                val right = size.width - 8.dp.toPx()
+                val top = 8.dp.toPx()
+                val bottom = size.height - 8.dp.toPx()
+                for (step in 0..4) {
+                    val y = bottom - (bottom - top) * step / 4f
+                    drawLine(Color(0xFFE5ECEF), Offset(left, y), Offset(right, y), strokeWidth = 1.dp.toPx())
+                }
+                val coords = points.mapIndexed { index, point ->
+                    val x = if (points.size == 1) (left + right) / 2 else left + (right - left) * index / (points.size - 1)
+                    val y = bottom - (bottom - top) * point.second / 10f
+                    Offset(x, y)
+                }
+                if (coords.size > 1) {
+                    val path = Path().apply {
+                        moveTo(coords.first().x, coords.first().y)
+                        coords.drop(1).forEach { lineTo(it.x, it.y) }
+                    }
+                    drawPath(path, color = Teal, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3.dp.toPx()))
+                }
+                coords.forEach { drawCircle(color = Teal, radius = 4.dp.toPx(), center = it) }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(points.first().first, color = Muted, fontSize = 9.sp)
+                Text("${points.size} assessments", color = Muted, fontSize = 9.sp)
+                Text(points.last().first, color = Muted, fontSize = 9.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubjectRatingBars(subjects: List<Pair<String, Float>>) {
+    Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(8.dp)).padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.BarChart, contentDescription = null, tint = Teal)
+            Text("  Subject ratings", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
+        if (subjects.isEmpty()) {
+            Text("No subject ratings available for this filter.", color = Muted, fontSize = 11.sp)
+        } else subjects.forEach { (subject, rating) ->
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(subject, color = Muted, fontSize = 10.sp, modifier = Modifier.width(98.dp))
+                Box(Modifier.weight(1f).height(12.dp).background(Color(0xFFE8EFF0), RoundedCornerShape(6.dp))) {
+                    Box(Modifier.fillMaxWidth((rating / 10f).coerceIn(0f, 1f)).height(12.dp).background(Teal, RoundedCornerShape(6.dp)))
+                }
+                Text(String.format("%.1f", rating), color = Ink, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+@Composable
 private fun ReviewAttemptDialog(title: String, payload: JSONObject, onDismiss: () -> Unit) {
     val paper = payload.optJSONArray("question_paper") ?: JSONArray()
     val attempts = payload.optJSONArray("attempts") ?: JSONArray()
@@ -677,29 +895,63 @@ private fun ReviewAttemptDialog(title: String, payload: JSONObject, onDismiss: (
             payload.optJSONObject("answers") ?: JSONObject()
         }
     } else payload.optJSONObject("answers") ?: JSONObject()
-    val result = payload.optJSONObject("result")
+    val selectedAttempt = (0 until attempts.length()).map { attempts.getJSONObject(it) }
+        .firstOrNull { it.optString("student_id") == selectedAttemptStudent }
+    val selectedResult = selectedAttempt?.optJSONObject("result") ?: payload.optJSONObject("result")
+    val selectedSubmittedAt = selectedAttempt?.optString("submitted_at") ?: payload.optString("submitted_at")
+    val selectedStudentName = selectedAttempt?.optString("student_name")?.takeIf(String::isNotBlank)
+        ?: selectedAttemptStudent
     AlertDialog(onDismissRequest = onDismiss, title = { Text(title, color = Ink, fontFamily = FontFamily.Serif) }, text = {
         LazyColumn(Modifier.height(520.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (attempts.length() > 0) {
-                item { Text("Attempt history", color = Teal, fontWeight = FontWeight.Bold, fontSize = 11.sp) }
                 item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for (index in 0 until attempts.length()) {
-                            val attempt = attempts.getJSONObject(index)
-                            val studentId = attempt.optString("student_id")
-                            TextButton(onClick = { selectedAttemptStudent = studentId }) {
-                                Text(if (studentId == selectedAttemptStudent) "• $studentId" else studentId, color = if (studentId == selectedAttemptStudent) Teal else Muted)
+                    var studentMenuExpanded by remember { mutableStateOf(false) }
+                    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text("Select student copy", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Box {
+                            OutlinedButton(onClick = { studentMenuExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+                                Icon(Icons.Default.Person, contentDescription = null, tint = Teal)
+                                Text("  $selectedStudentName", color = Ink, modifier = Modifier.weight(1f))
+                                Icon(Icons.Default.ArrowDropDown, contentDescription = "Choose student", tint = Teal)
+                            }
+                            DropdownMenu(expanded = studentMenuExpanded, onDismissRequest = { studentMenuExpanded = false }) {
+                                for (index in 0 until attempts.length()) {
+                                    val attempt = attempts.getJSONObject(index)
+                                    val studentId = attempt.optString("student_id")
+                                    val displayName = attempt.optString("student_name").ifBlank { studentId }
+                                    DropdownMenuItem(
+                                        text = { Text(displayName, color = Ink) },
+                                        leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = Teal) },
+                                        trailingIcon = { if (studentId == selectedAttemptStudent) Icon(Icons.Default.AssignmentTurnedIn, contentDescription = "Selected", tint = Teal) },
+                                        onClick = { selectedAttemptStudent = studentId; studentMenuExpanded = false }
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
-            item { Text("Submitted ${payload.optString("submitted_at")}", color = Muted, fontSize = 11.sp) }
-            result?.let {
+            item {
+                Row(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(8.dp)).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Schedule, contentDescription = null, tint = Teal)
+                    Text("  Submitted ${selectedSubmittedAt.ifBlank { "No submission date" }}", color = Muted, fontSize = 11.sp)
+                }
+            }
+            selectedResult?.let { result ->
                 item {
                     Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(10.dp)).padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.AssignmentTurnedIn, contentDescription = null, tint = Teal)
+                            Text("  ${selectedStudentName}'s result", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        }
                         Text("Score ${result.optString("score")}/${result.optString("max_score")} · ${result.optString("test_rating")}/10", color = Teal, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                         Text(result.optString("analysis"), color = Ink, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                        if (result.optString("advice").isNotBlank()) {
+                            Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.Top) {
+                                Icon(Icons.Default.TipsAndUpdates, contentDescription = null, tint = Teal)
+                                Text("  ${result.optString("advice")}", color = Muted, fontSize = 11.sp)
+                            }
+                        }
                     }
                 }
             }

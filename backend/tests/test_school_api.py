@@ -232,6 +232,11 @@ class SchoolApiTests(unittest.TestCase):
             response = self.client.post(f"/api/tests/{test_id}/attempts", json={"answers": {question_ids[0]: 1, question_ids[1]: "My reasoning works."}})
         self.assertEqual(response.status_code, 200, response.text)
 
+        self.user = {"id": "student9b002", "name": "Student Two", "username": "student9b002", "role": "student", "is_admin": 0}
+        with patch.object(main, "get_structured_test_analysis", return_value=self._fake_analysis()):
+            second_response = self.client.post(f"/api/tests/{test_id}/attempts", json={"answers": {question_ids[0]: 2, question_ids[1]: "I used a different method."}})
+        self.assertEqual(second_response.status_code, 200, second_response.text)
+
         self.user = {"id": "teacher01", "name": "Teacher One", "username": "teacher01", "role": "teacher", "is_admin": 0}
         review = self.client.get(f"/api/tests/{test_id}/attempts?student_id=student9b001")
         self.assertEqual(review.status_code, 200, review.text)
@@ -239,6 +244,12 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(payload["student_id"], "student9b001")
         self.assertEqual(payload["answers"][question_ids[0]], 1)
         self.assertEqual(payload["answers"][question_ids[1]], "My reasoning works.")
+        self.assertEqual(payload["attempts"][0]["student_name"], "Aanya Rao")
+        self.assertEqual(payload["attempts"][0]["result"]["analysis"], "Strong understanding.")
+        all_attempts = self.client.get(f"/api/tests/{test_id}/attempts")
+        self.assertEqual(all_attempts.status_code, 200, all_attempts.text)
+        self.assertEqual(len(all_attempts.json()["attempts"]), 2)
+        self.assertEqual({item["student_id"] for item in all_attempts.json()["attempts"]}, {"student9b001", "student9b002"})
 
     def test_test_creator_and_duration_are_returned_and_teacher_scoped(self):
         test_id, _ = self._create_test()
@@ -486,11 +497,13 @@ class SchoolApiTests(unittest.TestCase):
             db.execute("INSERT INTO test_analyses(id,attempt_id,test_id,student_id,result_json,created_at) VALUES(?,?,?,?,?,?)", ("extra-analysis", "extra-attempt", "test-class9-a-0-1", "student9a011", "{}", "2026-01-15T08:00:00+00:00"))
             db.execute("INSERT INTO student_analysis_snapshots(id,student_id,class_id,source_test_id,snapshot_at,overall_analysis,overall_rating,subject_ratings_json,metric_ratings_json,subject_analyses_json) VALUES(?,?,?,?,?,?,?,?,?,?)", ("extra-snapshot", "student9a011", "class9-a", "test-class9-a-0-1", "2026-01-15T08:00:00+00:00", "Sample", 5, "{}", "{}", "{}"))
             db.execute("UPDATE users SET name=? WHERE id=?", ("Sample Student A-001", "student9a001"))
+            db.execute("UPDATE test_analyses SET result_json=? WHERE test_id=? AND student_id=?", (json.dumps({"test_rating": 8, "analysis": "The student demonstrated mathematics knowledge with improving accuracy."}), "test-class9-a-0-1", "student9a001"))
             db.execute("UPDATE questions SET prompt=? WHERE id=?", ("Choose the correct response for Mathematics: question 1.", "test-class9-a-0-1-q1"))
             main.seed_school_data(db, main.password_digest, "", "", "schooladmin", "")
             class_ids = [row["class_id"] for row in db.execute("SELECT class_id FROM enrollments WHERE student_id=?", ("student9a001",))]
             student_name = db.execute("SELECT name FROM users WHERE id=?", ("student9a001",)).fetchone()["name"]
             question_prompt = db.execute("SELECT prompt FROM questions WHERE id=?", ("test-class9-a-0-1-q1",)).fetchone()["prompt"]
+            refreshed_analysis = json.loads(db.execute("SELECT result_json FROM test_analyses WHERE test_id=? AND student_id=?", ("test-class9-a-0-1", "student9a001")).fetchone()["result_json"])
             metric_count = db.execute("SELECT COUNT(*) FROM teacher_metrics WHERE class_id=? AND retired_at IS NULL", ("class9-a",)).fetchone()[0]
             removed_student = db.execute("SELECT COUNT(*) FROM users WHERE id=?", ("student9a011",)).fetchone()[0]
             removed_attempt = db.execute("SELECT COUNT(*) FROM test_attempts WHERE id=?", ("extra-attempt",)).fetchone()[0]
@@ -499,6 +512,10 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(class_ids, ["class9-a"])
         self.assertFalse(any(character.isdigit() for character in student_name))
         self.assertEqual(question_prompt, "Solve 3x = 12.")
+        self.assertIn("Mathematics", refreshed_analysis["analysis"])
+        self.assertNotIn("improving accuracy", refreshed_analysis["analysis"])
+        self.assertTrue(refreshed_analysis["advice"])
+        self.assertTrue(refreshed_analysis["strengths"])
         self.assertEqual(metric_count, 50)
         self.assertEqual(removed_student, 0)
         self.assertEqual(removed_attempt, 0)

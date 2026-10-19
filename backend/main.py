@@ -823,7 +823,9 @@ def get_test_attempts(test_id: str, student_id: str | None = None, user: dict = 
             allowed = db.execute("SELECT 1 FROM teacher_assignments WHERE class_id=? AND teacher_id=? AND unassigned_at IS NULL LIMIT 1", (test["class_id"], user["id"])).fetchone()
             if not allowed:
                 raise HTTPException(403, "You are not assigned to this class")
-        rows = db.execute("SELECT * FROM test_attempts WHERE test_id=? AND is_mock=0 ORDER BY submitted_at DESC", (test_id,)).fetchall()
+        rows = db.execute("""SELECT a.*,u.name AS student_name FROM test_attempts a
+            JOIN users u ON u.id=a.student_id WHERE a.test_id=? AND a.is_mock=0
+            ORDER BY a.submitted_at DESC""", (test_id,)).fetchall()
         attempts = []
         for attempt in rows:
             answer_map = json.loads(attempt["answers_json"]) if attempt["answers_json"] else {}
@@ -833,6 +835,7 @@ def get_test_attempts(test_id: str, student_id: str | None = None, user: dict = 
                 continue
             attempts.append({
                 "student_id": attempt["student_id"],
+                "student_name": attempt["student_name"],
                 "status": attempt["status"],
                 "submitted_at": attempt["submitted_at"],
                 "answers": answer_map,
