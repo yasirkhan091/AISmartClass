@@ -88,7 +88,7 @@ Gemini PDFs; they are user files and must remain untracked. `backend/AI_SAMPLE.m
 contains the compact JSON prompt shape and an illustrative (not model-generated)
 response.
 
-Latest validation: all 12 backend tests passed with the test harness explicitly
+Latest validation: all 13 backend tests passed with the test harness explicitly
 isolated from production environment variables, and `./gradlew assembleDebug`
 built `AIClassroom_v1.0.apk`. OpenRouter Chat Completions JSON mode requires the word `json`
 in the input when JSON mode is enabled; the backend prompt now includes it, and
@@ -101,39 +101,29 @@ free routes returned quota errors or invalid JSON. The dynamic `openrouter/free`
 route selected a free provider and returned synthetic analysis JSON that passed
 the complete backend validator. The full compact assessment context also
 passed, including required metric evidence. `openrouter/free` is now the local,
-template, and Render Blueprint default. Render health must be rechecked after
-deployment.
+template, and Render Blueprint default.
 
 A live synthetic student submission through `/api/tests/{id}/attempts` returned
 HTTP 200 with attempt status `analysed`; the analysis parsed and validated, and
 both its test analysis and cumulative rating snapshot were stored in an isolated
-temporary SQLite database. This verified the full submission-to-persistence
-path without writing test data to Neon.
+temporary SQLite database. A live Render mock submission also returned valid
+student feedback while hiding cumulative ratings and avoiding persistence.
 
-Neon preflight was read-only after the user rotated credentials. It still has
-the legacy schema with 2 users, 1 class, and 2 tests; the additive migration and
-seed have not yet been applied. Migration preflight stopped because the local
-demo student, demo teacher, and admin passwords are shorter than the production
-minimum of 10 characters. Do not weaken the production check; update these
-private values before migration. The logged-in Render service currently has
-`OPENAI_API_KEY` but not `OPEN_ROUTER_API_KEY`; add the new key in Render's
-private environment settings before deploying. Never print secret values or
-load backend/.env using shell `source`.
+Neon additive schema and deterministic seed are applied. Verified totals:
+Class 9 sections A-D, 80 enrollments each, 20 teachers, 160 historical tests,
+12,800 attempts, 12,800 analyses, 12,800 dated snapshots, 120 metrics, and one
+administrator. The original legacy class/data remain intact.
 
-Nothing has been committed or pushed. The version 1.0 APK is untracked. The two
-Gemini-generated sample PDFs are user files and must remain untracked/preserved.
-Before deployment: set distinct demo student/teacher and admin passwords of at
-least 10 characters, apply the additive schema/seed once, verify health and
-seeded counts, and add the OpenRouter key in Render. Then stage only intended
-source/docs/APK files. Do not include the two root PDFs or `.env` in the commit.
-Push only after Render's private OpenRouter key and admin/demo passwords are
-configured.
+Commit `c24f705` is pushed to `master`; Render auto-deployed it successfully.
+`/api/health` reports status=ok, ai_configured=true, provider=openrouter, and
+model=openrouter/free. Student, teacher, and admin logins were verified on
+Render, and the seeded student returned 40 per-test analysis records. The debug
+APK is included in the commit as `AIClassroom_v1.0.apk`. Keep the two root
+Gemini PDFs and `backend/.env` untracked; never print or commit secrets.
 
 RESTARTING THIS TASK
 --------------------
 1. Read this file and readme.txt; inspect git status before changing anything.
 2. Never display, commit, or paste secret values into chat or public files.
-3. Finish the Neon migration/seed only after rotating its exposed password.
-4. Verify `/api/health`, class/student/test/analysis counts, and Android login.
-5. Commit/push intended changes only after all checks pass; Render auto-deploys
-    commits to master. Review privacy/retention before real student data.
+3. Verify `/api/health`, seeded counts, and Android login after future changes.
+4. Review privacy/retention before using identifiable student data.
