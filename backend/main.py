@@ -312,6 +312,31 @@ def model_for_provider(provider: str | None = None) -> str:
     return os.getenv("OPENAI_MODEL") or "gpt-4.1-mini"
 
 
+def parse_openrouter_analysis_content(message: dict) -> dict:
+    if isinstance(message.get("parsed"), dict):
+        return message["parsed"]
+    content = message.get("content")
+    if isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            content = content["text"]
+        else:
+            return content
+    if isinstance(content, list):
+        blocks = [block if isinstance(block, str) else block.get("text", "") for block in content if isinstance(block, (str, dict))]
+        content = "".join(blocks)
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("OpenRouter response did not contain JSON text")
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            text = "\n".join(lines[1:-1]).strip()
+    result = json.loads(text)
+    if not isinstance(result, dict):
+        raise ValueError("OpenRouter analysis must be a JSON object")
+    return result
+
+
 def get_structured_test_analysis(context: str, subjective_max_score: float, metrics: list[dict]) -> dict:
     provider = ai_provider()
     if provider != "openrouter":
@@ -345,8 +370,7 @@ def get_structured_test_analysis(context: str, subjective_max_score: float, metr
         try:
             with urllib.request.urlopen(request, timeout=35) as response:
                 payload = json.loads(response.read())
-            text = payload["choices"][0]["message"]["content"]
-            result = json.loads(text)
+            result = parse_openrouter_analysis_content(payload["choices"][0]["message"])
             return validate_analysis_result(result, subjective_max_score, metrics)
         except urllib.error.HTTPError as error:
             if error.code == 402:

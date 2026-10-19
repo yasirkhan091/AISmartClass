@@ -164,6 +164,14 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(parsed["subjective_score"], 2)
         self.assertEqual(len(parsed["metric_ratings"]), len(metrics))
 
+    def test_openrouter_content_parser_accepts_model_response_shapes(self):
+        expected = {"analysis": "Clear work."}
+        encoded = json.dumps(expected)
+        self.assertEqual(main.parse_openrouter_analysis_content({"content": expected}), expected)
+        self.assertEqual(main.parse_openrouter_analysis_content({"content": {"type": "text", "text": encoded}}), expected)
+        self.assertEqual(main.parse_openrouter_analysis_content({"content": [{"type": "text", "text": encoded}]}), expected)
+        self.assertEqual(main.parse_openrouter_analysis_content({"content": f"```json\n{encoded}\n```"}), expected)
+
     def test_openrouter_invalid_output_and_transport_failures_are_retryable(self):
         class FakeResponse:
             def __enter__(self): return self
