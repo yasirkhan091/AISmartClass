@@ -1,0 +1,296 @@
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND_DIR))
+TEMP_DB = tempfile.TemporaryDirectory()
+os.environ["SMARTCLASS_DB"] = str(Path(TEMP_DB.name) / "school-api.db")
+for variable in (
+    "DATABASE_URL",
+    "APP_ENV",
+    "DEMO_STUDENT_USERNAME",
+    "DEMO_STUDENT_PASSWORD",
+    "DEMO_TEACHER_USERNAME",
+    "DEMO_TEACHER_PASSWORD",
+    "ADMIN_USERNAME",
+    "ADMIN_PASSWORD",
+    "OPENAI_API_KEY",
+    "OPENAI_MODEL",
+    "OPEN_ROUTER_API_KEY",
+    "OPEN_ROUTER_MODEL",
+    "AI_PROVIDER",
+):
+    os.environ.pop(variable, None)
+
+import main
+
+
+class SchoolApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with main.closing(main.connect()) as db:
+            salt = "school-api-test-salt"
+            db.execute("INSERT INTO users(id,name,email,role,username,password_salt,password_hash,is_admin,is_active) VALUES(?,?,?,?,?,?,?,?,1)", ("admin-test", "Test Administrator", None, "teacher", "admin-test", salt, main.password_digest("test-admin-password", salt), 1))
+            db.commit()
+
+    def setUp(self):
+        self.user = {"id": "teacher01", "name": "Teacher One", "username": "teacher01", "role": "teacher", "is_admin": 0}
+        main.app.dependency_overrides[main.authenticated_user] = lambda: self.user
+        self.client = TestClient(main.app)
+
+    def tearDown(self):
+        self.client.close()
+        main.app.dependency_overrides.clear()
+
+    def test_postgres_executemany_wraps_cursor_returned_as_none(self):
+        class FakeCursor:
+            rowcount = 2
+
+            def executemany(self, query, parameters):
+                self.query = query
+                self.parameters = parameters
+
+        class FakeConnection:
+            def __init__(self):
+                self.fake_cursor = FakeCursor()
+
+            def cursor(self):
+                return self.fake_cursor
+
+        connection = FakeConnection()
+        cursor = main.PostgresConnection(connection).executemany(
+            "INSERT INTO records(value) VALUES(?)",
+            [(1,), (2,)],
+        )
+
+        self.assertEqual(cursor.rowcount, 2)
+        self.assertEqual(connection.fake_cursor.query, "INSERT INTO records(value) VALUES(%s)")
+
+    def _create_test(self, is_mock=False):
+        response = self.client.post("/api/tests", json={
+            "class_id": "class9-b",
+            "title": "Digital Algebra Check",
+            "subject": "Mathematics",
+            "kind": "Assessment",
+            "due_date": "2026-10-19",
+            "is_mock": is_mock,
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        test_id = response.json()["id"]
+        questions = [
+            {"prompt": "Choose 2 + 2", "points": 2.5, "question_type": "mcq", "options": ["3", "4", "5"], "answer_key": 1},
+            {"prompt": "Explain your method", "points": 2.5, "question_type": "subjective", "answer_key": "The answer is four because two plus two is four."},
+        ]
+        question_ids = []
+        for question in questions:
+            created = self.client.post(f"/api/tests/{test_id}/questions", json=question)
+            self.assertEqual(created.status_code, 200, created.text)
+            question_ids.append(created.json()["id"])
+        published = self.client.post(f"/api/tests/{test_id}/publish")
+        self.assertEqual(published.status_code, 200, published.text)
+        return test_id, question_ids
+
+    def _fake_analysis(self):
+        with main.closing(main.connect()) as db:
+            metrics = [dict(row) for row in db.execute("SELECT id FROM teacher_metrics WHERE class_id=? AND subject=? AND retired_at IS NULL", ("class9-b", "Mathematics"))]
+        return {
+            "subjective_score": 2,
+            "test_rating": 9,
+            "analysis": "Strong understanding.",
+            "strengths": ["Accuracy"],
+            "focus_areas": ["Explain the method"],
+            "advice": "Keep showing your steps.",
+            "subject_rating": 8,
+            "metric_ratings": [{"metric_id": item["id"], "rating": 8, "evidence": "Clear response."} for item in metrics],
+            "overall_rating": 7.5,
+            "overall_analysis": "Steady improvement.",
+        }
+
+    def test_openrouter_prompt_and_json_response_contract(self):
+        with main.closing(main.connect()) as db:
+            metrics = [dict(row) for row in db.execute("SELECT id FROM teacher_metrics WHERE class_id=? AND subject=? AND retired_at IS NULL", ("class9-b", "Mathematics"))]
+        result = self._fake_analysis()
+        result["subjective_score"] = 2
+        fake_payload = {"choices": [{"message": {"role": "assistant", "content": json.dumps(result)}}]}
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps(fake_payload).encode()
+
+        with patch.dict(os.environ, {"AI_PROVIDER": "openrouter", "OPEN_ROUTER_API_KEY": "unit-test-key", "OPEN_ROUTER_MODEL": "openrouter/free"}):
+            with patch("main.urllib.request.urlopen", return_value=FakeResponse()) as request:
+                parsed = main.get_structured_test_analysis('{"sample":true}', 5, metrics)
+        request_object = request.call_args.args[0]
+        body = json.loads(request_object.data)
+        self.assertEqual(request_object.full_url, "https://openrouter.ai/api/v1/chat/completions")
+        self.assertEqual(request_object.get_header("Authorization"), "Bearer unit-test-key")
+        self.assertEqual(body["model"], "openrouter/free")
+        self.assertEqual(body["response_format"]["type"], "json_object")
+        self.assertIn("json", body["messages"][1]["content"])
+        self.assertIn("required_output", body["messages"][1]["content"])
+        self.assertEqual(parsed["subjective_score"], 2)
+        self.assertEqual(len(parsed["metric_ratings"]), len(metrics))
+
+    def test_openrouter_invalid_output_and_transport_failures_are_retryable(self):
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'{"choices":[{"message":{"content":"not valid analysis"}}]}'
+
+        with patch.dict(os.environ, {"AI_PROVIDER": "openrouter", "OPEN_ROUTER_API_KEY": "unit-test-key"}):
+            with patch("main.urllib.request.urlopen", return_value=FakeResponse()):
+                with self.assertRaises(main.HTTPException) as invalid:
+                    main.get_structured_test_analysis("{}", 5, [])
+            self.assertEqual(invalid.exception.status_code, 502)
+
+            with patch("main.urllib.request.urlopen", side_effect=main.urllib.error.URLError("offline")):
+                with self.assertRaises(main.HTTPException) as unavailable:
+                    main.get_structured_test_analysis("{}", 5, [])
+            self.assertEqual(unavailable.exception.status_code, 503)
+
+    def test_health_reports_configured_openrouter_provider(self):
+        with patch.dict(os.environ, {"AI_PROVIDER": "openrouter", "OPEN_ROUTER_API_KEY": "unit-test-key", "OPEN_ROUTER_MODEL": "openrouter/free"}):
+            result = main.health()
+        self.assertEqual(result, {"status": "ok", "ai_configured": True, "provider": "openrouter", "model": "openrouter/free"})
+
+    def test_persistent_submission_combines_mcq_and_ai_and_hides_cumulative_ratings(self):
+        test_id, question_ids = self._create_test()
+        student_id = "student9b001"
+        self.user = {"id": student_id, "name": "Student One", "username": student_id, "role": "student", "is_admin": 0}
+        payload = {"answers": {question_ids[0]: 1, question_ids[1]: "Two plus two equals four."}}
+        with patch.object(main, "get_structured_test_analysis", return_value=self._fake_analysis()) as ai:
+            response = self.client.post(f"/api/tests/{test_id}/attempts", json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["score"], 4.5)
+        self.assertNotIn("overall_rating", response.json())
+        self.assertNotIn("subject_rating", response.json())
+        self.assertNotIn("metric_ratings", response.json())
+        ai.assert_called_once()
+
+        with main.closing(main.connect()) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM test_analyses WHERE test_id=? AND student_id=?", (test_id, student_id)).fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM student_analysis_snapshots WHERE source_test_id=? AND student_id=?", (test_id, student_id)).fetchone()[0], 1)
+
+        duplicate_ai = patch.object(main, "get_structured_test_analysis", side_effect=AssertionError("duplicate called AI"))
+        with duplicate_ai:
+            duplicate = self.client.post(f"/api/tests/{test_id}/attempts", json=payload)
+        self.assertEqual(duplicate.status_code, 409)
+
+        self.user = {"id": "teacher01", "name": "Teacher One", "username": "teacher01", "role": "teacher", "is_admin": 0}
+        report = self.client.get(f"/api/classes/class9-b/students/{student_id}/analysis")
+        self.assertEqual(report.status_code, 200, report.text)
+        self.assertIsNone(report.json()["overall"])
+        self.assertEqual(set(report.json()["subject_ratings"]), {"Mathematics"})
+        self.assertTrue(all("overall_rating" not in item["result"] and "overall_analysis" not in item["result"] for item in report.json()["tests"]))
+        historical = self.client.get(f"/api/classes/class9-b/students/{student_id}/analysis?as_of=2026-01-15")
+        self.assertEqual(historical.status_code, 200, historical.text)
+        self.assertTrue(historical.json()["as_of"].startswith("2026-01-15"))
+        self.user = {"id": "teacher01", "name": "Class Teacher", "username": "teacher01", "role": "teacher", "is_admin": 0}
+        class_teacher_report = self.client.get("/api/classes/class9-a/students/student9a001/analysis")
+        self.assertEqual(class_teacher_report.status_code, 200, class_teacher_report.text)
+        self.assertIsNotNone(class_teacher_report.json()["overall"]["rating"])
+        self.assertEqual(len(class_teacher_report.json()["subject_ratings"]), 10)
+        self.assertEqual(len(class_teacher_report.json()["metric_ratings"]), 3)
+
+    def test_mock_submission_is_not_saved_and_other_subject_teacher_is_denied(self):
+        test_id, question_ids = self._create_test(is_mock=True)
+        self.user = {"id": "student9b001", "name": "Student One", "username": "student9b001", "role": "student", "is_admin": 0}
+        payload = {"answers": {question_ids[0]: 1, question_ids[1]: "Four, by adding two and two."}, "is_mock": True}
+        with main.closing(main.connect()) as db:
+            attempts_before = db.execute("SELECT COUNT(*) FROM test_attempts WHERE is_mock=1").fetchone()[0]
+            snapshots_before = db.execute("SELECT COUNT(*) FROM student_analysis_snapshots").fetchone()[0]
+        with patch.object(main, "get_structured_test_analysis", return_value=self._fake_analysis()):
+            response = self.client.post(f"/api/tests/{test_id}/attempts", json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["is_mock"])
+        self.assertNotIn("overall_rating", response.json())
+        with main.closing(main.connect()) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM test_attempts WHERE is_mock=1").fetchone()[0], attempts_before)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM student_analysis_snapshots").fetchone()[0], snapshots_before)
+
+        self.user = {"id": "teacher03", "name": "Teacher Three", "username": "teacher03", "role": "teacher", "is_admin": 0}
+        denied = self.client.post("/api/tests", json={"class_id": "class9-b", "title": "Wrong subject", "subject": "Mathematics"})
+        self.assertEqual(denied.status_code, 403)
+
+    def test_answers_survive_ai_failure_and_can_be_retried(self):
+        test_id, question_ids = self._create_test()
+        self.user = {"id": "student9b002", "name": "Student Two", "username": "student9b002", "role": "student", "is_admin": 0}
+        payload = {"answers": {question_ids[0]: 1, question_ids[1]: "Two plus two makes four."}}
+        with patch.object(main, "get_structured_test_analysis", side_effect=main.HTTPException(402, "No credits")):
+            failed = self.client.post(f"/api/tests/{test_id}/attempts", json=payload)
+        self.assertEqual(failed.status_code, 402)
+        with main.closing(main.connect()) as db:
+            pending = db.execute("SELECT id,status,answers_json FROM test_attempts WHERE test_id=? AND student_id=?", (test_id, self.user["id"])).fetchone()
+            self.assertEqual(pending["status"], "submitted")
+            self.assertEqual(json.loads(pending["answers_json"]), payload["answers"])
+        reopened = self.client.get(f"/api/tests/{test_id}")
+        self.assertEqual(reopened.status_code, 200, reopened.text)
+        self.assertEqual(reopened.json()["my_attempt"]["answers"], payload["answers"])
+
+        with patch.object(main, "get_structured_test_analysis", return_value=self._fake_analysis()):
+            retried = self.client.post(f"/api/tests/{test_id}/attempts", json=payload)
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertEqual(retried.json()["attempt_id"], pending["id"])
+
+    def test_admin_can_manage_account_and_assignment_but_subject_teacher_cannot(self):
+        self.user = {"id": "teacher01", "name": "Teacher One", "username": "teacher01", "role": "teacher", "is_admin": 0}
+        denied = self.client.get("/api/admin/classes")
+        self.assertEqual(denied.status_code, 403)
+        self.user = {"id": "admin-test", "name": "Administrator", "username": "admin-test", "role": "teacher", "is_admin": 1}
+        classes = self.client.get("/api/admin/classes")
+        self.assertEqual(classes.status_code, 200, classes.text)
+        self.assertEqual(len(classes.json()), 4)
+        admin_ratings = self.client.get("/api/classes/class9-a/ratings")
+        self.assertEqual(admin_ratings.status_code, 200, admin_ratings.text)
+        self.assertEqual(len(admin_ratings.json()[0]["metric_ratings"]), 30)
+        student = self.client.post("/api/admin/students", json={"username": "newstudent", "name": "New Student", "password": "long-enough-test-password", "class_id": "class9-a"})
+        self.assertEqual(student.status_code, 200, student.text)
+        updated_student = self.client.patch(f"/api/admin/users/{student.json()['id']}", json={"name": "Updated Student", "password": "another-long-test-password", "class_id": "class9-d"})
+        self.assertEqual(updated_student.status_code, 200, updated_student.text)
+        with main.closing(main.connect()) as db:
+            self.assertEqual(db.execute("SELECT name FROM users WHERE id=?", (student.json()["id"],)).fetchone()["name"], "Updated Student")
+            self.assertEqual(db.execute("SELECT class_id FROM enrollments WHERE student_id=?", (student.json()["id"],)).fetchone()["class_id"], "class9-d")
+        teacher = self.client.post("/api/admin/teachers", json={"username": "newteacher", "name": "New Teacher", "password": "long-enough-test-password", "assignments": [{"teacher_id": "newteacher", "class_id": "class9-a", "assignment_type": "subject", "subject": "Biology"}]})
+        self.assertEqual(teacher.status_code, 200, teacher.text)
+        assignment = self.client.post("/api/admin/assignments", json={"teacher_id": "newteacher", "class_id": "class9-c", "assignment_type": "class", "subject": None})
+        self.assertEqual(assignment.status_code, 200, assignment.text)
+        with main.closing(main.connect()) as db:
+            subject_assignment_id = db.execute("SELECT id FROM teacher_assignments WHERE teacher_id=? AND class_id=? AND assignment_type='subject'", ("newteacher", "class9-a")).fetchone()["id"]
+        revoked = self.client.delete(f"/api/admin/assignments/{subject_assignment_id}")
+        self.assertEqual(revoked.status_code, 200, revoked.text)
+        assignment_id = assignment.json()["id"]
+        self.assertEqual(self.client.delete(f"/api/admin/assignments/{assignment_id}").status_code, 200)
+        self.user = {"id": "newteacher", "name": "New Teacher", "username": "newteacher", "role": "teacher", "is_admin": 0}
+        self.assertEqual(self.client.get("/api/classes/class9-a/tests").status_code, 403)
+
+    def test_demo_seed_has_requested_roster_and_history(self):
+        with main.closing(main.connect()) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM classes WHERE id LIKE 'class9-%'").fetchone()[0], 4)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM users WHERE role='student' AND username LIKE 'student9%' ").fetchone()[0], 320)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM users WHERE role='teacher' AND username LIKE 'teacher%' ").fetchone()[0], 20)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tests WHERE is_mock=0 AND id LIKE 'test-class9-%'").fetchone()[0], 160)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM test_analyses WHERE test_id LIKE 'test-class9-%'").fetchone()[0], 12800)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM teacher_assignments WHERE assignment_type='class' AND id LIKE 'class-teacher-class9-%'").fetchone()[0], 4)
+            january = db.execute("SELECT subject_ratings_json FROM student_analysis_snapshots WHERE student_id=? AND snapshot_at LIKE '2026-01-15%' ORDER BY id DESC LIMIT 1", ("student9a001",)).fetchone()
+            self.assertEqual(len(json.loads(january["subject_ratings_json"])), 10)
+
+    def test_admin_can_be_bootstrapped_after_demo_seed_marker(self):
+        with main.closing(main.connect()) as db:
+            result = main.seed_school_data(db, main.password_digest, "", "", "schooladmin", "secure-test-admin-password")
+            admin = db.execute("SELECT is_admin,password_salt,password_hash FROM users WHERE username=?", ("schooladmin",)).fetchone()
+        self.assertFalse(result["seeded"])
+        self.assertTrue(result["admin_seeded"])
+        self.assertTrue(admin["is_admin"])
+        self.assertEqual(main.password_digest("secure-test-admin-password", admin["password_salt"]), admin["password_hash"])
+
+
+if __name__ == "__main__":
+    unittest.main()

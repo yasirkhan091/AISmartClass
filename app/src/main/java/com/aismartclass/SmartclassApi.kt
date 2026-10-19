@@ -2,8 +2,6 @@ package com.aismartclass
 
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-import java.io.DataOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -25,76 +23,79 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
 
     fun tests(classId: String): JSONArray = requestArray("/api/classes/$classId/tests")
 
-    fun mockTests(classId: String): JSONArray = requestArray("/api/classes/$classId/mock-tests")
+    fun digitalTest(testId: String): JSONObject = requestJson("/api/tests/$testId", "GET", null)
 
-    fun mockQuestions(testId: String): JSONArray = requestArray("/api/mock-tests/$testId/questions")
+    fun myAnalyses(): JSONArray = requestArray("/api/students/me/analyses")
 
-    fun latestMockAttempt(testId: String): JSONObject = requestJson("/api/mock-tests/$testId/my-latest-attempt", "GET", null)
+    fun studentAnalysis(classId: String, studentId: String, asOf: String? = null): JSONObject = requestJson(
+        "/api/classes/$classId/students/$studentId/analysis" + (asOf?.let { "?as_of=${java.net.URLEncoder.encode(it, "UTF-8")}" } ?: ""),
+        "GET",
+        null
+    )
+
+    fun classRatings(classId: String): JSONArray = requestArray("/api/classes/$classId/ratings")
+
+    fun metrics(classId: String, subject: String): JSONArray = requestArray(
+        "/api/classes/$classId/metrics?subject=${java.net.URLEncoder.encode(subject, "UTF-8")}"
+    )
 
     fun plans(classId: String): JSONArray = requestArray("/api/classes/$classId/plans")
 
-    fun submissions(classId: String, isTeacher: Boolean): JSONArray = requestArray(
-        if (isTeacher) "/api/classes/$classId/submissions" else "/api/students/me/submissions"
-    )
-
-    fun createTest(classId: String, title: String, subject: String, kind: String, dueDate: String): JSONObject =
+    fun createDigitalTest(classId: String, title: String, subject: String, kind: String, dueDate: String, isMock: Boolean): JSONObject =
         requestJson("/api/tests", "POST", JSONObject()
             .put("class_id", classId)
             .put("title", title)
             .put("subject", subject)
             .put("kind", kind)
-            .put("due_date", dueDate))
+            .put("due_date", dueDate)
+            .put("is_mock", isMock))
 
-    fun updateTest(testId: String, title: String, subject: String, kind: String, dueDate: String): JSONObject =
-        requestJson("/api/tests/$testId", "PATCH", JSONObject()
-            .put("title", title).put("subject", subject).put("kind", kind).put("due_date", dueDate))
+    fun addQuestion(testId: String, question: JSONObject): JSONObject =
+        requestJson("/api/tests/$testId/questions", "POST", question)
 
-    fun deleteTest(testId: String): JSONObject = requestJson("/api/tests/$testId", "DELETE", JSONObject())
+    fun publishTest(testId: String): JSONObject = requestJson("/api/tests/$testId/publish", "POST", JSONObject())
 
-    fun submitMockAttempt(testId: String, answers: JSONObject): JSONObject =
-        requestJson("/api/mock-tests/$testId/attempts", "POST", JSONObject().put("answers", answers))
-
-    fun viewMockAdvice(attemptId: String): JSONObject = requestJson("/api/mock-attempts/$attemptId/advice", "POST", JSONObject())
-
-    fun uploadTestPaper(testId: String, filename: String, bytes: ByteArray) =
-        requestMultipart("/api/tests/$testId/paper", "paper", filename, bytes)
+    fun submitTest(testId: String, answers: JSONObject, isMock: Boolean): JSONObject =
+        requestJson("/api/tests/$testId/attempts", "POST", JSONObject().put("answers", answers).put("is_mock", isMock))
 
     fun createPlan(classId: String, week: String, title: String, target: String): JSONObject =
         requestJson("/api/classes/$classId/plans", "POST", JSONObject()
             .put("week", week).put("title", title).put("target", target))
 
-    fun uploadAnswerSheet(testId: String, filename: String, bytes: ByteArray): JSONObject =
-        requestMultipart("/api/tests/$testId/submissions", "answer_sheet", filename, bytes)
+    fun createMetric(classId: String, subject: String, name: String, description: String, weight: Double): JSONObject =
+        requestJson("/api/classes/$classId/metrics", "POST", JSONObject()
+            .put("subject", subject).put("name", name).put("description", description).put("weight", weight))
 
-    fun evaluate(submissionId: String): JSONObject = requestJson("/api/submissions/$submissionId/evaluate", "POST", JSONObject())
+    fun adminClasses(): JSONArray = requestArray("/api/admin/classes")
 
-    fun download(path: String): ByteArray = requestBytes(path, "GET", null, null)
+    fun adminUsers(role: String? = null): JSONArray = requestArray("/api/admin/users" + (role?.let { "?role=$it" } ?: ""))
+
+    fun adminCreateStudent(username: String, name: String, password: String, classId: String): JSONObject =
+        requestJson("/api/admin/students", "POST", JSONObject().put("username", username).put("name", name).put("password", password).put("class_id", classId))
+
+    fun adminCreateTeacher(username: String, name: String, password: String, assignments: JSONArray): JSONObject =
+        requestJson("/api/admin/teachers", "POST", JSONObject().put("username", username).put("name", name).put("password", password).put("assignments", assignments))
+
+    fun adminUpdateUser(userId: String, updates: JSONObject): JSONObject =
+        requestJson("/api/admin/users/$userId", "PATCH", updates)
+
+    fun adminAssignTeacher(teacherId: String, classId: String, assignmentType: String, subject: String?): JSONObject =
+        requestJson("/api/admin/assignments", "POST", JSONObject().put("teacher_id", teacherId).put("class_id", classId).put("assignment_type", assignmentType).put("subject", subject))
+
+    fun adminSetActive(userId: String, active: Boolean): JSONObject =
+        requestJson("/api/admin/users/$userId/active?active=$active", "PATCH", JSONObject())
 
     private fun requestArray(path: String): JSONArray = JSONArray(String(requestBytes(path, "GET", null, null), Charsets.UTF_8))
 
     private fun requestJson(path: String, method: String, body: JSONObject?): JSONObject =
         JSONObject(String(requestBytes(path, method, body?.toString()?.toByteArray(Charsets.UTF_8), if (body == null) null else "application/json"), Charsets.UTF_8))
 
-    private fun requestMultipart(path: String, partName: String, filename: String, fileBytes: ByteArray): JSONObject {
-        val boundary = "Smartclass-${System.nanoTime()}"
-        val body = ByteArrayOutputStream()
-        val safeFilename = filename.replace("\"", "")
-        DataOutputStream(body).use { stream ->
-            stream.writeBytes("--$boundary\r\n")
-            stream.writeBytes("Content-Disposition: form-data; name=\"$partName\"; filename=\"$safeFilename\"\r\n")
-            stream.writeBytes("Content-Type: application/pdf\r\n\r\n")
-            stream.write(fileBytes)
-            stream.writeBytes("\r\n--$boundary--\r\n")
-        }
-        return JSONObject(String(requestBytes(path, "POST", body.toByteArray(), "multipart/form-data; boundary=$boundary"), Charsets.UTF_8))
-    }
-
     private fun requestBytes(path: String, method: String, body: ByteArray?, contentType: String?): ByteArray {
         val connection = (URL("$baseUrl$path").openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 12_000
             readTimeout = 180_000
-            setRequestProperty("Accept", "application/json, application/pdf")
+            setRequestProperty("Accept", "application/json")
             if (token != null) setRequestProperty("Authorization", "Bearer $token")
             if (contentType != null) setRequestProperty("Content-Type", contentType)
             doInput = true

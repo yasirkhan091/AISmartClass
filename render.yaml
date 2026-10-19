@@ -13,23 +13,19 @@ services:
         value: production
       - key: DATABASE_URL
         sync: false
-      - key: DEMO_STUDENT_USERNAME
-        value: IsraKhan
-      - key: DEMO_TEACHER_USERNAME
-        value: YasirKhan
       - key: DEMO_STUDENT_PASSWORD
         sync: false
       - key: DEMO_TEACHER_PASSWORD
         sync: false
       - key: AI_PROVIDER
-        value: auto
-      - key: GEMINI_API_KEY
+        value: openrouter
+      - key: OPEN_ROUTER_API_KEY
         sync: false
-      - key: GEMINI_MODEL
-        value: gemini-3.8-flash
-      - key: OPENAI_API_KEY
+      - key: OPEN_ROUTER_MODEL
+        value: openrouter/free
+      - key: ADMIN_USERNAME
+        value: schooladmin
+      - key: ADMIN_PASSWORD
         sync: false
-      - key: OPENAI_MODEL
-        value: gpt-4.1-mini
       - key: LOG_LEVEL
         value: INFO

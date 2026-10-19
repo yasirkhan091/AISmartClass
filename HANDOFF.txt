@@ -1,5 +1,5 @@
 AI SMARTCLASS - PROJECT HANDOFF
-Updated: 2026-10-13
+Updated: 2026-10-19 (digital assessment migration in progress)
 
 PROJECT
 -------
@@ -13,20 +13,20 @@ Latest verified source commit at handoff start: e2993c2
 
 PURPOSE AND FUNCTION
 --------------------
-AI Smartclass is a native Android classroom app with student and teacher
-portals. Teachers publish tests and question-paper PDFs. Students upload
-answer-sheet PDFs, receive AI grading/advice, and can take an algebra MCQ
-practice test. The backend also stores classes, plans, rubrics, sessions,
-evaluations, and student profiles.
+AI Smartclass is a native Android classroom app with student, teacher, and
+administrator portals. Teachers create digital MCQ and written-answer tests;
+students answer in the app and submit JSON. The backend stores per-test AI
+analysis and dated cumulative rating snapshots.
 
 TECH STACK
 ----------
 Frontend: Kotlin, Android SDK, Jetpack Compose, Material 3.
-Backend: Python, FastAPI, Uvicorn, JSON REST endpoints, multipart PDF uploads.
+Backend: Python, FastAPI, Uvicorn, JSON REST endpoints.
 Local database: SQLite. Production database: PostgreSQL via psycopg.
-PDF persistence: PDF bytes are stored in PostgreSQL so Render restarts do not
-lose uploads. AI providers: OpenAI Responses API and Google Gemini, called only
-from the backend so provider keys are not shipped in the APK.
+Assessments: question/answer JSON is compacted server-side before the OpenRouter
+Chat Completions API call. MCQs are validated locally; the model grades subjective
+answers and returns a validated JSON analysis. Mock tests are non-persistent.
+Provider keys stay on the backend and are never shipped in the APK.
 Hosting: Render free web service; Neon PostgreSQL is hosted separately.
 
 DEPLOYMENT AND MOBILE APP
@@ -41,27 +41,25 @@ Build the installable debug APK from the repository root:
     ./gradlew assembleDebug
 
 Output:
-    AIClassroom_v0.9.apk
+    AIClassroom_v1.0.apk
 
 Install the APK on a phone, sign in using the class account usernames below,
-and test connection to the Render API. The Render health response last verified
-as status=ok, AI configured, provider=openai, model=gpt-4.1-mini. The health
-endpoint also probes PostgreSQL.
+and test connection to the Render API. The last observed Render health response
+was status=ok with provider=openai and model=gpt-4.1-mini, before the OpenRouter
+switch. Recheck provider/model and PostgreSQL health after deploying the update.
 
 ACCOUNTS AND SECRETS
 --------------------
-Seeded usernames are IsraKhan (student) and YasirKhan (teacher); login ignores
-username capitalization. Their passwords are Render environment secrets and
-must not be stored in this file, source code, APK, or public Git history.
-Production requires separate passwords of at least 10 characters; longer
-passwords are recommended. All students currently share one account, so this is
-for a controlled pilot only, not real student data.
+The deterministic seed creates Class 9 sections A-D, 80 students per section,
+20 teachers, 10 subjects, four tests per subject, metrics, synthetic analysis,
+and historical rating snapshots. Seed accounts use DEMO_STUDENT_PASSWORD and
+DEMO_TEACHER_PASSWORD; the production administrator uses ADMIN_USERNAME and
+ADMIN_PASSWORD. Passwords are hosting/local secrets and must never appear in
+this file, source code, APK, or public Git history.
 
 backend/.env and render-secrets.txt are ignored by Git. Keep DATABASE_URL,
-OPENAI_API_KEY, GEMINI_API_KEY, and both account passwords in private local or
-hosting settings only. A Gemini key may have been exposed in a browser snapshot
-during setup; rotate it before using Gemini again. OpenAI is the verified
-provider in the hosted health response.
+OPEN_ROUTER_API_KEY, account passwords, and ADMIN_PASSWORD in private local or
+hosting settings only. OpenRouter is the configured analysis provider.
 
 LOCAL BACKEND DEVELOPMENT
 -------------------------
@@ -74,12 +72,68 @@ For LAN phone testing, enter the development machine's reachable address in the
 app. Local HTTP is for development only; hosted phones should use the HTTPS
 Render URL.
 
+CURRENT WORK STATUS (2026-10-19)
+--------------------------------
+The working tree contains an uncommitted digital-assessment rewrite. It
+replaces active PDF workflows with typed JSON exams, MCQ validation, subjective
+AI grading, per-test analysis, dated cumulative snapshots, assignment-scoped
+teacher reports, admin account/assignment APIs, and a Compose exam/admin UI.
+The deterministic seed is designed for 4 sections, 320 students, 20 teachers,
+10 subjects, 160 historical tests, and 12,800 synthetic attempts/analyses; mock
+tests are available in all four sections and are non-persistent.
+
+The active Android and backend workflows are digital-only. The tracked legacy
+PDF generator and six demo PDFs have been removed. Preserve the two root-level
+Gemini PDFs; they are user files and must remain untracked. `backend/AI_SAMPLE.md`
+contains the compact JSON prompt shape and an illustrative (not model-generated)
+response.
+
+Latest validation: all 12 backend tests passed with the test harness explicitly
+isolated from production environment variables, and `./gradlew assembleDebug`
+built `AIClassroom_v1.0.apk`. OpenRouter Chat Completions JSON mode requires the word `json`
+in the input when JSON mode is enabled; the backend prompt now includes it, and
+the request contract is tested. Invalid model JSON/schema responses now return
+502 and provider transport failures return 503 while preserving submitted
+answers for retry.
+
+The OpenRouter catalog authenticated successfully. Paid and several individual
+free routes returned quota errors or invalid JSON. The dynamic `openrouter/free`
+route selected a free provider and returned synthetic analysis JSON that passed
+the complete backend validator. The full compact assessment context also
+passed, including required metric evidence. `openrouter/free` is now the local,
+template, and Render Blueprint default. Render health must be rechecked after
+deployment.
+
+A live synthetic student submission through `/api/tests/{id}/attempts` returned
+HTTP 200 with attempt status `analysed`; the analysis parsed and validated, and
+both its test analysis and cumulative rating snapshot were stored in an isolated
+temporary SQLite database. This verified the full submission-to-persistence
+path without writing test data to Neon.
+
+Neon preflight was read-only after the user rotated credentials. It still has
+the legacy schema with 2 users, 1 class, and 2 tests; the additive migration and
+seed have not yet been applied. Migration preflight stopped because the local
+demo student, demo teacher, and admin passwords are shorter than the production
+minimum of 10 characters. Do not weaken the production check; update these
+private values before migration. The logged-in Render service currently has
+`OPENAI_API_KEY` but not `OPEN_ROUTER_API_KEY`; add the new key in Render's
+private environment settings before deploying. Never print secret values or
+load backend/.env using shell `source`.
+
+Nothing has been committed or pushed. The version 1.0 APK is untracked. The two
+Gemini-generated sample PDFs are user files and must remain untracked/preserved.
+Before deployment: set distinct demo student/teacher and admin passwords of at
+least 10 characters, apply the additive schema/seed once, verify health and
+seeded counts, and add the OpenRouter key in Render. Then stage only intended
+source/docs/APK files. Do not include the two root PDFs or `.env` in the commit.
+Push only after Render's private OpenRouter key and admin/demo passwords are
+configured.
+
 RESTARTING THIS TASK
 --------------------
-1. Run git pull origin master.
-2. Read this file and readme.txt before changing deployment or auth settings.
-3. Never display, commit, or paste secret values into chat or public files.
-4. Build with ./gradlew assembleDebug and verify /api/health after backend
-   changes. Render redeploys backend changes pushed to master.
-5. Keep student work synthetic or redacted until individual accounts, privacy
-   controls, and a retention policy are implemented.
+1. Read this file and readme.txt; inspect git status before changing anything.
+2. Never display, commit, or paste secret values into chat or public files.
+3. Finish the Neon migration/seed only after rotating its exposed password.
+4. Verify `/api/health`, class/student/test/analysis counts, and Android login.
+5. Commit/push intended changes only after all checks pass; Render auto-deploys
+    commits to master. Review privacy/retention before real student data.
