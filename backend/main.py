@@ -79,12 +79,12 @@ class PostgresConnection:
 
     def execute(self, query, parameters=()):
         query = query.replace("CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP::text")
-        return DatabaseCursor(self.connection.execute(query.replace("?", "%s"), parameters))
+        return DatabaseCursor(self.connection.execute(query.replace("%", "%%").replace("?", "%s"), parameters))
 
     def executemany(self, query, parameters):
         query = query.replace("CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP::text")
         cursor = self.connection.cursor()
-        cursor.executemany(query.replace("?", "%s"), parameters)
+        cursor.executemany(query.replace("%", "%%").replace("?", "%s"), parameters)
         return DatabaseCursor(cursor)
 
     def executescript(self, script):
@@ -149,7 +149,7 @@ def initialize():
             if column not in user_columns:
                 db.execute(f"ALTER TABLE users ADD COLUMN {column} {declaration}")
         migrations = {
-            "tests": (("is_mock", "INTEGER NOT NULL DEFAULT 0"), ("published", "INTEGER NOT NULL DEFAULT 0")),
+            "tests": (("is_mock", "INTEGER NOT NULL DEFAULT 0"), ("published", "INTEGER NOT NULL DEFAULT 0"), ("created_by", "TEXT REFERENCES users(id)"), ("duration_minutes", "INTEGER NOT NULL DEFAULT 60")),
             "questions": (("question_type", "TEXT NOT NULL DEFAULT 'subjective'"), ("options_json", "TEXT NOT NULL DEFAULT '[]'"), ("answer_key", "TEXT"), ("position", "INTEGER NOT NULL DEFAULT 0")),
         }
         for table, additions in migrations.items():
@@ -160,6 +160,10 @@ def initialize():
             for column, declaration in additions:
                 if column not in columns:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        db.execute("""UPDATE tests SET created_by=(SELECT a.teacher_id FROM teacher_assignments a
+            WHERE a.class_id=tests.class_id AND a.subject=tests.subject AND a.assignment_type='subject'
+            AND a.unassigned_at IS NULL ORDER BY a.assigned_at LIMIT 1)
+            WHERE created_by IS NULL AND is_mock=0""")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_assignments_current ON teacher_assignments(teacher_id,class_id,unassigned_at)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_test_attempt_student ON test_attempts(student_id,submitted_at)")
@@ -207,6 +211,7 @@ class TestInput(BaseModel):
     kind: str = "Assessment"
     due_date: str | None = None
     is_mock: bool = False
+    duration_minutes: int = 60
 
 
 class TestUpdate(BaseModel):
@@ -214,6 +219,7 @@ class TestUpdate(BaseModel):
     subject: str | None = None
     kind: str | None = None
     due_date: str | None = None
+    duration_minutes: int | None = None
 
 
 class QuestionInput(BaseModel):
@@ -226,7 +232,7 @@ class QuestionInput(BaseModel):
 
 
 class TestAttemptInput(BaseModel):
-    answers: dict[str, str | int]
+    answers: dict[str, str | int | None]
     is_mock: bool = False
 
 
@@ -251,6 +257,11 @@ class AdminStudentInput(BaseModel):
     class_id: str
 
 
+class AdminClassInput(BaseModel):
+    name: str
+    year: str
+
+
 class AdminTeacherInput(BaseModel):
     username: str
     name: str
@@ -267,7 +278,7 @@ class AdminUserUpdate(BaseModel):
 
 def test_payload(row):
     columns = row.keys()
-    return {"id": row["id"], "class_id": row["class_id"], "title": row["title"], "subject": row["subject"], "kind": row["kind"], "due_date": row["due_date"], "question_count": row["question_count"], "is_mock": bool(row["is_mock"]), "published": bool(row["published"]), "completed": bool(row["completed"]) if "completed" in columns else False, "pending": bool(row["pending"]) if "pending" in columns else False}
+    return {"id": row["id"], "class_id": row["class_id"], "title": row["title"], "subject": row["subject"], "kind": row["kind"], "due_date": row["due_date"], "question_count": row["question_count"], "is_mock": bool(row["is_mock"]), "published": bool(row["published"]), "duration_minutes": row["duration_minutes"] if "duration_minutes" in columns else 60, "completed": bool(row["completed"]) if "completed" in columns else False, "pending": bool(row["pending"]) if "pending" in columns else False}
 
 
 def ai_provider() -> str:
@@ -345,11 +356,25 @@ def login(data: Login):
         db.commit()
         logger.info("User authenticated")
         if row["is_admin"]:
-            classes = [dict(item) for item in db.execute("SELECT id,name,year FROM classes ORDER BY name")]
+            class_rows = [dict(item) for item in db.execute("SELECT id,name,year FROM classes ORDER BY name")]
         elif row["role"] == "teacher":
-            classes = [dict(item) for item in db.execute("SELECT DISTINCT c.id,c.name,c.year FROM classes c JOIN teacher_assignments a ON a.class_id=c.id WHERE a.teacher_id=? AND a.unassigned_at IS NULL ORDER BY c.name", (row["id"],))]
+            class_rows = [dict(item) for item in db.execute("SELECT DISTINCT c.id,c.name,c.year FROM classes c JOIN teacher_assignments a ON a.class_id=c.id WHERE a.teacher_id=? AND a.unassigned_at IS NULL ORDER BY c.name", (row["id"],))]
         else:
-            classes = [dict(item) for item in db.execute("SELECT c.id,c.name,c.year FROM classes c JOIN enrollments e ON e.class_id=c.id WHERE e.student_id=? ORDER BY c.name", (row["id"],))]
+            class_rows = [dict(item) for item in db.execute("SELECT c.id,c.name,c.year FROM classes c JOIN enrollments e ON e.class_id=c.id WHERE e.student_id=? ORDER BY c.name", (row["id"],))]
+        classes = []
+        for school_class in class_rows:
+            if row["is_admin"]:
+                assignments = db.execute("SELECT subject,assignment_type FROM teacher_assignments WHERE class_id=? AND unassigned_at IS NULL", (school_class["id"],)).fetchall()
+                is_class_teacher = True
+                subjects = sorted({assignment["subject"] for assignment in assignments if assignment["subject"]})
+            elif row["role"] == "teacher":
+                assignments = db.execute("SELECT subject,assignment_type FROM teacher_assignments WHERE class_id=? AND teacher_id=? AND unassigned_at IS NULL", (school_class["id"], row["id"])).fetchall()
+                is_class_teacher = any(assignment["assignment_type"] == "class" for assignment in assignments)
+                subjects = sorted({assignment["subject"] for assignment in assignments if assignment["subject"]})
+            else:
+                is_class_teacher = False
+                subjects = []
+            classes.append({**school_class, "is_class_teacher": is_class_teacher, "subjects": subjects})
         selected_class = classes[0] if classes else {"id": "", "name": "No class assigned", "year": ""}
         return {"access_token": token, "user": {"id": row["id"], "name": row["name"], "username": row["username"], "role": row["role"], "is_admin": bool(row["is_admin"])}, "class": selected_class, "classes": classes}
 
@@ -372,7 +397,7 @@ def require_class_access(class_id: str, user: dict, teacher_only: bool = False, 
     with closing(connect()) as db:
         if user["role"] == "teacher":
             if subject:
-                row = db.execute("SELECT 1 FROM teacher_assignments WHERE class_id=? AND teacher_id=? AND unassigned_at IS NULL AND (assignment_type='class' OR (assignment_type='subject' AND subject=?))", (class_id, user["id"], subject)).fetchone()
+                row = db.execute("SELECT 1 FROM teacher_assignments WHERE class_id=? AND teacher_id=? AND subject=? AND assignment_type='subject' AND unassigned_at IS NULL", (class_id, user["id"], subject)).fetchone()
             else:
                 row = db.execute("SELECT 1 FROM teacher_assignments WHERE class_id=? AND teacher_id=? AND unassigned_at IS NULL", (class_id, user["id"])).fetchone()
         else:
@@ -421,28 +446,42 @@ def list_plans(class_id: str, user: dict = Depends(authenticated_user)):
 
 
 @app.get("/api/classes/{class_id}/tests")
-def list_tests(class_id: str, user: dict = Depends(authenticated_user)):
+def list_tests(class_id: str, subject: str | None = None, is_mock: bool | None = None, user: dict = Depends(authenticated_user)):
     require_class_access(class_id, user)
     with closing(connect()) as db:
         if user["role"] == "student":
-            rows = db.execute("""SELECT t.*,COUNT(q.id) AS question_count,
+            filters = ["t.class_id=?", "t.published=1"]
+            parameters = [user["id"], user["id"], class_id]
+            query = """SELECT t.*,COUNT(q.id) AS question_count,
                 EXISTS(SELECT 1 FROM test_attempts a WHERE a.test_id=t.id AND a.student_id=? AND a.is_mock=0 AND a.status='analysed') AS completed,
                 EXISTS(SELECT 1 FROM test_attempts a WHERE a.test_id=t.id AND a.student_id=? AND a.is_mock=0 AND a.status='submitted') AS pending
-                FROM tests t LEFT JOIN questions q ON q.test_id=t.id
-                WHERE t.class_id=? AND t.published=1 GROUP BY t.id ORDER BY t.due_date,t.title""", (user["id"], user["id"], class_id)).fetchall()
+                FROM tests t LEFT JOIN questions q ON q.test_id=t.id"""
         else:
-            rows = db.execute("""SELECT t.*,COUNT(q.id) AS question_count FROM tests t LEFT JOIN questions q ON q.test_id=t.id
-                WHERE t.class_id=? AND (?=1 OR EXISTS (SELECT 1 FROM teacher_assignments a WHERE a.class_id=t.class_id AND a.teacher_id=? AND a.unassigned_at IS NULL AND (a.assignment_type='class' OR (a.assignment_type='subject' AND a.subject=t.subject))))
-                GROUP BY t.id ORDER BY t.due_date,t.title""", (class_id, int(user.get("is_admin", False)), user["id"])).fetchall()
+            filters = ["t.class_id=?"]
+            parameters = [class_id]
+            query = "SELECT t.*,COUNT(q.id) AS question_count FROM tests t LEFT JOIN questions q ON q.test_id=t.id"
+            if not user.get("is_admin"):
+                filters.append("t.created_by=?")
+                parameters.append(user["id"])
+        if subject:
+            filters.append("t.subject=?")
+            parameters.append(subject)
+        if is_mock is not None:
+            filters.append("t.is_mock=?")
+            parameters.append(int(is_mock))
+        query += " WHERE " + " AND ".join(filters) + " GROUP BY t.id ORDER BY t.due_date,t.title"
+        rows = db.execute(query, parameters).fetchall()
         return [test_payload(row) for row in rows]
 
 
 @app.post("/api/tests")
 def create_test(data: TestInput, user: dict = Depends(authenticated_user)):
     require_subject_assignment(data.class_id, data.subject, user)
+    if not 1 <= data.duration_minutes <= 240:
+        raise HTTPException(422, "Test duration must be between 1 and 240 minutes")
     test_id = str(uuid.uuid4())
     with closing(connect()) as db:
-        db.execute("INSERT INTO tests(id,class_id,title,subject,kind,due_date,is_mock,published) VALUES(?,?,?,?,?,?,?,0)", (test_id, data.class_id, data.title, data.subject, data.kind, data.due_date, int(data.is_mock)))
+        db.execute("INSERT INTO tests(id,class_id,title,subject,kind,due_date,is_mock,published,created_by,duration_minutes) VALUES(?,?,?,?,?,?,?,0,?,?)", (test_id, data.class_id, data.title, data.subject, data.kind, data.due_date, int(data.is_mock), user["id"], data.duration_minutes))
         db.commit()
     return {"id": test_id, **data.model_dump()}
 
@@ -452,7 +491,7 @@ def update_test(test_id: str, data: TestUpdate, user: dict = Depends(authenticat
     values = data.model_dump(exclude_unset=True)
     if not values:
         raise HTTPException(400, "Provide at least one test field to update")
-    allowed_fields = {"title", "subject", "kind", "due_date"}
+    allowed_fields = {"title", "subject", "kind", "due_date", "duration_minutes"}
     if any(field not in allowed_fields for field in values):
         raise HTTPException(400, "Unsupported test field")
     with closing(connect()) as db:
@@ -460,6 +499,8 @@ def update_test(test_id: str, data: TestUpdate, user: dict = Depends(authenticat
         if not row:
             raise HTTPException(404, "Test not found")
         require_subject_assignment(row["class_id"], row["subject"], user)
+        if "duration_minutes" in values and values["duration_minutes"] is not None and not 1 <= values["duration_minutes"] <= 240:
+            raise HTTPException(422, "Test duration must be between 1 and 240 minutes")
         if "subject" in values:
             require_subject_assignment(row["class_id"], values["subject"], user)
         assignments = ",".join(f"{field}=?" for field in values)
@@ -513,6 +554,7 @@ def get_digital_test(test_id: str, user: dict = Depends(authenticated_user)):
             attempt = db.execute("SELECT id,status,answers_json,submitted_at FROM test_attempts WHERE test_id=? AND student_id=? AND is_mock=0", (test_id, user["id"])).fetchone()
     return {
         **{key: test[key] for key in ("id", "class_id", "title", "subject", "kind", "due_date", "is_mock", "published")},
+        "duration_minutes": test["duration_minutes"] if "duration_minutes" in test.keys() else 60,
         "questions": [{"id": row["id"], "prompt": row["prompt"], "points": row["points"], "question_type": row["question_type"], "options": json.loads(row["options_json"]), **({"answer_key": json.loads(row["answer_key"]) if row["answer_key"] else None} if user["role"] != "student" else {})} for row in questions],
         "my_attempt": None if not attempt else {"id": attempt["id"], "status": attempt["status"], "answers": json.loads(attempt["answers_json"]), "submitted_at": attempt["submitted_at"]},
     }
@@ -595,24 +637,28 @@ def submit_digital_test(test_id: str, data: TestAttemptInput, user: dict = Depen
             existing_attempt = db.execute("SELECT id,status,answers_json,submitted_at FROM test_attempts WHERE test_id=? AND student_id=? AND is_mock=0", (test_id, user["id"])).fetchone()
             if existing_attempt and existing_attempt["status"] != "submitted":
                 raise HTTPException(409, "You already submitted this test")
-            if existing_attempt and json.loads(existing_attempt["answers_json"]) != data.answers:
-                raise HTTPException(409, "A saved submission already exists; retry it with the original answers")
         questions = [dict(row) for row in db.execute("SELECT id,prompt,points,question_type,options_json,answer_key,position FROM questions WHERE test_id=? ORDER BY position,id", (test_id,))]
     if not questions:
         raise HTTPException(409, "This test has no questions")
     expected_ids = {question["id"] for question in questions}
-    if set(data.answers) != expected_ids:
-        raise HTTPException(422, "Answer every question before submitting")
+    if set(data.answers) - expected_ids:
+        raise HTTPException(422, "Answers include an unknown question")
+    normalized_answers = {}
     for question in questions:
-        answer = data.answers[question["id"]]
+        answer = data.answers.get(question["id"])
         if question["question_type"] == "mcq":
             options = json.loads(question["options_json"] or "[]")
-            if not isinstance(answer, int) or isinstance(answer, bool) or not 0 <= answer < len(options):
+            if answer is not None and (not isinstance(answer, int) or isinstance(answer, bool) or not 0 <= answer < len(options)):
                 raise HTTPException(422, "An MCQ answer choice is invalid")
-        elif not isinstance(answer, str) or not answer.strip() or len(answer) > 20000:
-            raise HTTPException(422, "Subjective answers must contain 1 to 20,000 characters")
+        elif answer is None:
+            answer = ""
+        elif not isinstance(answer, str) or len(answer) > 20000:
+            raise HTTPException(422, "Subjective answers must contain at most 20,000 characters")
+        normalized_answers[question["id"]] = answer
+    if existing_attempt and json.loads(existing_attempt["answers_json"]) != normalized_answers:
+        raise HTTPException(409, "A saved submission already exists; retry it with the original answers")
     if data.is_mock:
-        result = _analyse_test_submission(dict(test), questions, data.answers, user["id"], True)
+        result = _analyse_test_submission(dict(test), questions, normalized_answers, user["id"], True)
         public = {key: value for key, value in result.items() if key not in {"overall_rating", "overall_analysis", "subject_rating", "metric_ratings"}}
         return {"attempt_id": None, "is_mock": True, **public}
     attempt_id = existing_attempt["id"] if existing_attempt else str(uuid.uuid4())
@@ -620,12 +666,12 @@ def submit_digital_test(test_id: str, data: TestAttemptInput, user: dict = Depen
     with closing(connect()) as db:
         if not existing_attempt:
             try:
-                db.execute("INSERT INTO test_attempts(id,test_id,student_id,answers_json,status,submitted_at,is_mock) VALUES(?,?,?,?,?,?,0)", (attempt_id, test_id, user["id"], json.dumps(data.answers), "submitted", submitted_at))
+                db.execute("INSERT INTO test_attempts(id,test_id,student_id,answers_json,status,submitted_at,is_mock) VALUES(?,?,?,?,?,?,0)", (attempt_id, test_id, user["id"], json.dumps(normalized_answers), "submitted", submitted_at))
             except get_integrity_errors() as error:
                 db.rollback()
                 raise HTTPException(409, "You already submitted this test") from error
             db.commit()
-    result = _analyse_test_submission(dict(test), questions, data.answers, user["id"], False)
+    result = _analyse_test_submission(dict(test), questions, normalized_answers, user["id"], False)
     with closing(connect()) as db:
         db.execute("UPDATE test_attempts SET status='analysed' WHERE id=? AND status='submitted'", (attempt_id,))
         db.execute("INSERT INTO test_analyses(id,attempt_id,test_id,student_id,result_json,created_at) VALUES(?,?,?,?,?,?)", (str(uuid.uuid4()), attempt_id, test_id, user["id"], json.dumps(result), submitted_at))
@@ -659,7 +705,7 @@ def list_my_test_analyses(user: dict = Depends(authenticated_user)):
 
 
 @app.get("/api/classes/{class_id}/students/{student_id}/analysis")
-def get_student_analysis(class_id: str, student_id: str, as_of: str | None = None, user: dict = Depends(authenticated_user)):
+def get_student_analysis(class_id: str, student_id: str, as_of: str | None = None, subject: str | None = None, user: dict = Depends(authenticated_user)):
     if user["role"] != "teacher" and not user.get("is_admin"):
         raise HTTPException(403, "Teacher access required")
     with closing(connect()) as db:
@@ -670,10 +716,21 @@ def get_student_analysis(class_id: str, student_id: str, as_of: str | None = Non
         assignments = _current_teacher_assignments(db, class_id, user) if not user.get("is_admin") else [{"subject": None, "assignment_type": "class"}]
         is_class_teacher = user.get("is_admin") or any(item["assignment_type"] == "class" for item in assignments)
         allowed_subjects = {item["subject"] for item in assignments if item["subject"]}
-        rows = db.execute("""SELECT a.test_id,a.created_at,a.result_json,t.title,t.subject,t.due_date
+        if subject and not is_class_teacher and subject not in allowed_subjects:
+            raise HTTPException(403, "You are not assigned to this subject in this class")
+        analysis_query = """SELECT a.test_id,a.created_at,a.result_json,t.title,t.subject,t.due_date
             FROM test_analyses a JOIN tests t ON t.id=a.test_id
-            WHERE a.student_id=? AND t.class_id=? ORDER BY a.created_at DESC,a.test_id""", (student_id, class_id)).fetchall()
-        if not is_class_teacher:
+            WHERE a.student_id=? AND t.class_id=?"""
+        analysis_params = [student_id, class_id]
+        if as_of:
+            cutoff = as_of + "T23:59:59.999999+23:59" if len(as_of) == 10 else as_of
+            analysis_query += " AND a.created_at<=?"
+            analysis_params.append(cutoff)
+        analysis_query += " ORDER BY a.created_at DESC,a.test_id"
+        rows = db.execute(analysis_query, analysis_params).fetchall()
+        if subject:
+            rows = [row for row in rows if row["subject"] == subject]
+        elif not is_class_teacher:
             rows = [row for row in rows if row["subject"] in allowed_subjects]
         query = "SELECT * FROM student_analysis_snapshots WHERE student_id=? AND class_id=?"
         params = [student_id, class_id]
@@ -683,18 +740,25 @@ def get_student_analysis(class_id: str, student_id: str, as_of: str | None = Non
         query += " ORDER BY snapshot_at DESC,id DESC LIMIT 1"
         snapshot = db.execute(query, params).fetchone()
         visible_subjects = json.loads(snapshot["subject_ratings_json"]) if snapshot else {}
-        if not is_class_teacher:
+        if subject:
+            visible_subjects = {key: value for key, value in visible_subjects.items() if key == subject}
+        elif not is_class_teacher:
             visible_subjects = {key: value for key, value in visible_subjects.items() if key in allowed_subjects}
         if user.get("is_admin"):
-            metric_rows = db.execute("SELECT id FROM teacher_metrics WHERE class_id=? AND retired_at IS NULL", (class_id,)).fetchall()
+            metric_sql = "SELECT id,name,subject FROM teacher_metrics WHERE class_id=? AND retired_at IS NULL"
+            metric_params = [class_id]
+            if subject:
+                metric_sql += " AND subject=?"
+                metric_params.append(subject)
+            metric_rows = db.execute(metric_sql, metric_params).fetchall()
         elif allowed_subjects:
-            placeholders = ",".join("?" for _ in allowed_subjects)
-            metric_rows = db.execute(f"SELECT id FROM teacher_metrics WHERE class_id=? AND teacher_id=? AND retired_at IS NULL AND subject IN ({placeholders})", (class_id, user["id"], *sorted(allowed_subjects))).fetchall()
+            visible_allowed = {subject} if subject else allowed_subjects
+            placeholders = ",".join("?" for _ in visible_allowed)
+            metric_rows = db.execute(f"SELECT id,name,subject FROM teacher_metrics WHERE class_id=? AND teacher_id=? AND retired_at IS NULL AND subject IN ({placeholders})", (class_id, user["id"], *sorted(visible_allowed))).fetchall()
         else:
             metric_rows = []
-        visible_metric_ids = {row["id"] for row in metric_rows}
-        metric_ratings = json.loads(snapshot["metric_ratings_json"]) if snapshot else {}
-        metric_ratings = {key: value for key, value in metric_ratings.items() if key in visible_metric_ids}
+        raw_metric_ratings = json.loads(snapshot["metric_ratings_json"]) if snapshot else {}
+        metric_ratings = {row["id"]: {"name": row["name"], "subject": row["subject"], "rating": raw_metric_ratings.get(row["id"])} for row in metric_rows}
     visible_tests = []
     for row in rows:
         result = json.loads(row["result_json"])
@@ -723,14 +787,14 @@ def list_class_ratings(class_id: str, user: dict = Depends(authenticated_user)):
         students = db.execute("SELECT u.id,u.name FROM users u JOIN enrollments e ON e.student_id=u.id WHERE e.class_id=? AND u.is_active=1 ORDER BY u.name", (class_id,)).fetchall()
         records = []
         for student in students:
-            snapshot = db.execute("SELECT snapshot_at,overall_rating,subject_ratings_json,metric_ratings_json FROM student_analysis_snapshots WHERE student_id=? AND class_id=? ORDER BY snapshot_at DESC,id DESC LIMIT 1", (student["id"], class_id)).fetchone()
+            snapshot = db.execute("SELECT snapshot_at,overall_rating,overall_analysis,subject_ratings_json,metric_ratings_json FROM student_analysis_snapshots WHERE student_id=? AND class_id=? ORDER BY snapshot_at DESC,id DESC LIMIT 1", (student["id"], class_id)).fetchone()
             subjects = json.loads(snapshot["subject_ratings_json"]) if snapshot else {}
             if not is_class_teacher:
                 subjects = {key: value for key, value in subjects.items() if key in allowed_subjects}
             metrics = json.loads(snapshot["metric_ratings_json"]) if snapshot else {}
             metric_rows = db.execute("SELECT id,subject,name,teacher_id FROM teacher_metrics WHERE class_id=? AND retired_at IS NULL", (class_id,)).fetchall()
             metrics = {metric["id"]: {"subject": metric["subject"], "name": metric["name"], "rating": metrics.get(metric["id"])} for metric in metric_rows if user.get("is_admin") or metric["subject"] in allowed_subjects and metric["teacher_id"] == user["id"]}
-            records.append({"student_id": student["id"], "name": student["name"], "as_of": snapshot["snapshot_at"] if snapshot else None, "overall_rating": snapshot["overall_rating"] if snapshot and is_class_teacher else None, "subject_ratings": subjects, "metric_ratings": metrics})
+            records.append({"student_id": student["id"], "name": student["name"], "as_of": snapshot["snapshot_at"] if snapshot else None, "overall_rating": snapshot["overall_rating"] if snapshot and is_class_teacher else None, "overall_analysis": snapshot["overall_analysis"] if snapshot and is_class_teacher else None, "subject_ratings": subjects, "metric_ratings": metrics})
     return records
 
 
@@ -791,6 +855,22 @@ def admin_list_classes(user: dict = Depends(authenticated_user)):
     with closing(connect()) as db:
         rows = db.execute("SELECT c.id,c.name,c.year,COUNT(DISTINCT CASE WHEN u.is_active=1 THEN e.student_id END) AS student_count FROM classes c LEFT JOIN enrollments e ON e.class_id=c.id LEFT JOIN users u ON u.id=e.student_id GROUP BY c.id ORDER BY c.name").fetchall()
     return [dict(row) for row in rows]
+
+
+@app.post("/api/admin/classes")
+def admin_create_class(data: AdminClassInput, user: dict = Depends(authenticated_user)):
+    require_admin(user)
+    name = data.name.strip()
+    year = data.year.strip()
+    if not name or not year:
+        raise HTTPException(422, "Class name and school year are required")
+    class_id = str(uuid.uuid4())
+    with closing(connect()) as db:
+        if db.execute("SELECT 1 FROM classes WHERE lower(name)=lower(?) AND year=?", (name, year)).fetchone():
+            raise HTTPException(409, "That class already exists for this school year")
+        db.execute("INSERT INTO classes(id,name,year,teacher_id) VALUES(?,?,?,NULL)", (class_id, name, year))
+        db.commit()
+    return {"id": class_id, "name": name, "year": year, "student_count": 0}
 
 
 @app.get("/api/admin/users")

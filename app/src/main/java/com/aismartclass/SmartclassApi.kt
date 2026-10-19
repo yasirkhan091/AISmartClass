@@ -27,11 +27,13 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
 
     fun myAnalyses(): JSONArray = requestArray("/api/students/me/analyses")
 
-    fun studentAnalysis(classId: String, studentId: String, asOf: String? = null): JSONObject = requestJson(
-        "/api/classes/$classId/students/$studentId/analysis" + (asOf?.let { "?as_of=${java.net.URLEncoder.encode(it, "UTF-8")}" } ?: ""),
-        "GET",
-        null
-    )
+    fun studentAnalysis(classId: String, studentId: String, asOf: String? = null, subject: String? = null): JSONObject {
+        val query = listOfNotNull(
+            asOf?.let { "as_of=${java.net.URLEncoder.encode(it, "UTF-8")}" },
+            subject?.let { "subject=${java.net.URLEncoder.encode(it, "UTF-8")}" }
+        ).joinToString("&")
+        return requestJson("/api/classes/$classId/students/$studentId/analysis" + if (query.isBlank()) "" else "?$query", "GET", null)
+    }
 
     fun classRatings(classId: String): JSONArray = requestArray("/api/classes/$classId/ratings")
 
@@ -41,14 +43,15 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
 
     fun plans(classId: String): JSONArray = requestArray("/api/classes/$classId/plans")
 
-    fun createDigitalTest(classId: String, title: String, subject: String, kind: String, dueDate: String, isMock: Boolean): JSONObject =
+    fun createDigitalTest(classId: String, title: String, subject: String, kind: String, dueDate: String, isMock: Boolean, durationMinutes: Int): JSONObject =
         requestJson("/api/tests", "POST", JSONObject()
             .put("class_id", classId)
             .put("title", title)
             .put("subject", subject)
             .put("kind", kind)
             .put("due_date", dueDate)
-            .put("is_mock", isMock))
+            .put("is_mock", isMock)
+            .put("duration_minutes", durationMinutes))
 
     fun addQuestion(testId: String, question: JSONObject): JSONObject =
         requestJson("/api/tests/$testId/questions", "POST", question)
@@ -67,6 +70,9 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
             .put("subject", subject).put("name", name).put("description", description).put("weight", weight))
 
     fun adminClasses(): JSONArray = requestArray("/api/admin/classes")
+
+    fun adminCreateClass(name: String, year: String): JSONObject =
+        requestJson("/api/admin/classes", "POST", JSONObject().put("name", name).put("year", year))
 
     fun adminUsers(role: String? = null): JSONArray = requestArray("/api/admin/users" + (role?.let { "?role=$it" } ?: ""))
 

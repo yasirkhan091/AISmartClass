@@ -73,6 +73,31 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(cursor.rowcount, 2)
         self.assertEqual(connection.fake_cursor.query, "INSERT INTO records(value) VALUES(%s)")
 
+    def test_postgres_adapter_escapes_literal_like_percent(self):
+        class FakeCursor:
+            rowcount = 1
+
+            def execute(self, query, parameters):
+                self.query = query
+                self.parameters = parameters
+                return self
+
+        class FakeConnection:
+            def __init__(self):
+                self.fake_cursor = FakeCursor()
+
+            def execute(self, query, parameters):
+                return self.fake_cursor.execute(query, parameters)
+
+        connection = FakeConnection()
+        main.PostgresConnection(connection).execute(
+            "SELECT id FROM tests WHERE id LIKE 'test-class9-%' AND subject=?",
+            ("Physics",),
+        )
+
+        self.assertEqual(connection.fake_cursor.query, "SELECT id FROM tests WHERE id LIKE 'test-class9-%%' AND subject=%s")
+        self.assertEqual(connection.fake_cursor.parameters, ("Physics",))
+
     def _create_test(self, is_mock=False):
         response = self.client.post("/api/tests", json={
             "class_id": "class9-b",
@@ -156,10 +181,60 @@ class SchoolApiTests(unittest.TestCase):
                     main.get_structured_test_analysis("{}", 5, [])
             self.assertEqual(unavailable.exception.status_code, 503)
 
+    def test_timed_submission_accepts_unanswered_questions(self):
+        test_id, question_ids = self._create_test()
+        self.user = {"id": "student9b001", "name": "Student One", "username": "student9b001", "role": "student", "is_admin": 0}
+        with patch.object(main, "get_structured_test_analysis", return_value=self._fake_analysis()):
+            response = self.client.post(f"/api/tests/{test_id}/attempts", json={"answers": {question_ids[0]: 1}})
+        self.assertEqual(response.status_code, 200, response.text)
+        with main.closing(main.connect()) as db:
+            stored = json.loads(db.execute("SELECT answers_json FROM test_attempts WHERE id=?", (response.json()["attempt_id"],)).fetchone()["answers_json"])
+        self.assertEqual(stored[question_ids[0]], 1)
+        self.assertEqual(stored[question_ids[1]], "")
+
+    def test_student_test_listing_filters_by_subject_and_mock_mode(self):
+        self.user = {"id": "student9a001", "name": "Student One", "username": "student9a001", "role": "student", "is_admin": 0}
+        regular = self.client.get("/api/classes/class9-a/tests?subject=Mathematics&is_mock=false")
+        self.assertEqual(regular.status_code, 200, regular.text)
+        self.assertTrue(regular.json())
+        self.assertTrue(all(item["subject"] == "Mathematics" and not item["is_mock"] for item in regular.json()))
+        mock = self.client.get("/api/classes/class9-a/tests?is_mock=true")
+        self.assertEqual(len(mock.json()), 1)
+        self.assertTrue(mock.json()[0]["is_mock"])
+
+    def test_test_creator_and_duration_are_returned_and_teacher_scoped(self):
+        test_id, _ = self._create_test()
+        with main.closing(main.connect()) as db:
+            created_by = db.execute("SELECT created_by,duration_minutes FROM tests WHERE id=?", (test_id,)).fetchone()
+        self.assertEqual(created_by["created_by"], "teacher01")
+        self.assertEqual(created_by["duration_minutes"], 60)
+
+        self.user = {"id": "teacher03", "name": "Teacher Three", "username": "teacher03", "role": "teacher", "is_admin": 0}
+        visible = self.client.get("/api/classes/class9-b/tests?subject=English&is_mock=false")
+        self.assertEqual(visible.status_code, 200, visible.text)
+        self.assertTrue(all(item["subject"] == "English" and not item["is_mock"] for item in visible.json()))
+        with main.closing(main.connect()) as db:
+            owners = {row["id"]: row["created_by"] for row in db.execute("SELECT id,created_by FROM tests WHERE class_id=? AND subject=? AND is_mock=0", ("class9-b", "English"))}
+        self.assertTrue(all(owners[item["id"]] == "teacher03" for item in visible.json()))
+
     def test_health_reports_configured_openrouter_provider(self):
         with patch.dict(os.environ, {"AI_PROVIDER": "openrouter", "OPEN_ROUTER_API_KEY": "unit-test-key", "OPEN_ROUTER_MODEL": "openrouter/free"}):
             result = main.health()
         self.assertEqual(result, {"status": "ok", "ai_configured": True, "provider": "openrouter", "model": "openrouter/free"})
+
+    def test_login_returns_role_scoped_class_assignment_metadata(self):
+        class_teacher = main.login(main.Login(username="teacher01", password=""))
+        class_a = next(item for item in class_teacher["classes"] if item["id"] == "class9-a")
+        self.assertTrue(class_a["is_class_teacher"])
+        self.assertIn("Mathematics", class_a["subjects"])
+
+        subject_teacher = main.login(main.Login(username="teacher07", password=""))
+        class_a_subjects = next(item for item in subject_teacher["classes"] if item["id"] == "class9-a")
+        self.assertFalse(class_a_subjects["is_class_teacher"])
+        self.assertEqual(class_a_subjects["subjects"], ["Physics"])
+
+        student = main.login(main.Login(username="student9a001", password=""))
+        self.assertEqual([item["id"] for item in student["classes"]], ["class9-a"])
 
     def test_persistent_submission_combines_mcq_and_ai_and_hides_cumulative_ratings(self):
         test_id, question_ids = self._create_test()
@@ -189,7 +264,15 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(report.status_code, 200, report.text)
         self.assertIsNone(report.json()["overall"])
         self.assertEqual(set(report.json()["subject_ratings"]), {"Mathematics"})
+        metric = next(iter(report.json()["metric_ratings"].values()))
+        self.assertEqual(metric["subject"], "Mathematics")
+        self.assertTrue(metric["name"])
         self.assertTrue(all("overall_rating" not in item["result"] and "overall_analysis" not in item["result"] for item in report.json()["tests"]))
+        unauthorized_subject = self.client.get(f"/api/classes/class9-b/students/{student_id}/analysis?subject=Biology")
+        self.assertEqual(unauthorized_subject.status_code, 403)
+        subject_report = self.client.get(f"/api/classes/class9-b/students/{student_id}/analysis?subject=Mathematics")
+        self.assertEqual(subject_report.status_code, 200, subject_report.text)
+        self.assertTrue(all(item["subject"] == "Mathematics" for item in subject_report.json()["tests"]))
         historical = self.client.get(f"/api/classes/class9-b/students/{student_id}/analysis?as_of=2026-01-15")
         self.assertEqual(historical.status_code, 200, historical.text)
         self.assertTrue(historical.json()["as_of"].startswith("2026-01-15"))
@@ -198,7 +281,7 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(class_teacher_report.status_code, 200, class_teacher_report.text)
         self.assertIsNotNone(class_teacher_report.json()["overall"]["rating"])
         self.assertEqual(len(class_teacher_report.json()["subject_ratings"]), 10)
-        self.assertEqual(len(class_teacher_report.json()["metric_ratings"]), 3)
+        self.assertEqual(len(class_teacher_report.json()["metric_ratings"]), 5)
 
     def test_mock_submission_is_not_saved_and_other_subject_teacher_is_denied(self):
         test_id, question_ids = self._create_test(is_mock=True)
@@ -248,9 +331,13 @@ class SchoolApiTests(unittest.TestCase):
         classes = self.client.get("/api/admin/classes")
         self.assertEqual(classes.status_code, 200, classes.text)
         self.assertEqual(len(classes.json()), 4)
+        created_class = self.client.post("/api/admin/classes", json={"name": "Class 8 Section A", "year": "2026 / 27"})
+        self.assertEqual(created_class.status_code, 200, created_class.text)
+        duplicate_class = self.client.post("/api/admin/classes", json={"name": "class 8 section a", "year": "2026 / 27"})
+        self.assertEqual(duplicate_class.status_code, 409)
         admin_ratings = self.client.get("/api/classes/class9-a/ratings")
         self.assertEqual(admin_ratings.status_code, 200, admin_ratings.text)
-        self.assertEqual(len(admin_ratings.json()[0]["metric_ratings"]), 30)
+        self.assertEqual(len(admin_ratings.json()[0]["metric_ratings"]), 50)
         student = self.client.post("/api/admin/students", json={"username": "newstudent", "name": "New Student", "password": "long-enough-test-password", "class_id": "class9-a"})
         self.assertEqual(student.status_code, 200, student.text)
         updated_student = self.client.patch(f"/api/admin/users/{student.json()['id']}", json={"name": "Updated Student", "password": "another-long-test-password", "class_id": "class9-d"})
@@ -281,6 +368,36 @@ class SchoolApiTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM teacher_assignments WHERE assignment_type='class' AND id LIKE 'class-teacher-class9-%'").fetchone()[0], 4)
             january = db.execute("SELECT subject_ratings_json FROM student_analysis_snapshots WHERE student_id=? AND snapshot_at LIKE '2026-01-15%' ORDER BY id DESC LIMIT 1", ("student9a001",)).fetchone()
             self.assertEqual(len(json.loads(january["subject_ratings_json"])), 10)
+            student_names = [row["name"] for row in db.execute("SELECT name FROM users WHERE role='student' AND username LIKE 'student9%'")]
+            self.assertEqual(len(set(student_names)), 320)
+            self.assertFalse(any(any(character.isdigit() for character in name) for name in student_names))
+            teacher_names = [row["name"] for row in db.execute("SELECT name FROM users WHERE role='teacher' AND username LIKE 'teacher%'")]
+            self.assertEqual(len(set(teacher_names)), 20)
+            self.assertFalse(any(any(character.isdigit() for character in name) for name in teacher_names))
+            metric_names = {row["name"] for row in db.execute("SELECT DISTINCT name FROM teacher_metrics WHERE class_id LIKE 'class9-%'")}
+            self.assertEqual(metric_names, {"Precision", "Time management", "Critical thinking", "Concept application", "Communication"})
+            mock_question = db.execute("""SELECT q.prompt,q.options_json FROM questions q JOIN tests t ON t.id=q.test_id
+                WHERE t.id=? ORDER BY q.position LIMIT 1""", ("mock-general-knowledge-a",)).fetchone()
+            self.assertIn("planet", mock_question["prompt"].lower())
+            self.assertGreaterEqual(len(json.loads(mock_question["options_json"])), 2)
+
+    def test_seed_refresh_removes_stale_class_enrollment(self):
+        with main.closing(main.connect()) as db:
+            db.execute("INSERT INTO classes(id,name,year,teacher_id) VALUES(?,?,?,NULL)", ("legacy-algebra", "Class 9 Algebra", "2026"))
+            db.execute("INSERT INTO enrollments(class_id,student_id) VALUES(?,?)", ("legacy-algebra", "student9a001"))
+            db.execute("UPDATE users SET name=? WHERE id=?", ("Sample Student A-001", "student9a001"))
+            db.execute("UPDATE questions SET prompt=? WHERE id=?", ("Choose the correct response for Mathematics: question 1.", "test-class9-a-0-1-q1"))
+            main.seed_school_data(db, main.password_digest, "", "", "schooladmin", "")
+            class_ids = [row["class_id"] for row in db.execute("SELECT class_id FROM enrollments WHERE student_id=?", ("student9a001",))]
+            student_name = db.execute("SELECT name FROM users WHERE id=?", ("student9a001",)).fetchone()["name"]
+            question_prompt = db.execute("SELECT prompt FROM questions WHERE id=?", ("test-class9-a-0-1-q1",)).fetchone()["prompt"]
+            metric_count = db.execute("SELECT COUNT(*) FROM teacher_metrics WHERE class_id=? AND retired_at IS NULL", ("class9-a",)).fetchone()[0]
+            db.execute("DELETE FROM classes WHERE id=?", ("legacy-algebra",))
+            db.commit()
+        self.assertEqual(class_ids, ["class9-a"])
+        self.assertFalse(any(character.isdigit() for character in student_name))
+        self.assertEqual(question_prompt, "Solve 3x = 12.")
+        self.assertEqual(metric_count, 50)
 
     def test_admin_can_be_bootstrapped_after_demo_seed_marker(self):
         with main.closing(main.connect()) as db:
