@@ -1,5 +1,5 @@
 AI SMARTCLASS - PROJECT HANDOFF
-Updated: 2026-10-19 (digital assessment migration in progress)
+Updated: 2026-10-19 (admin and teacher portal refinements)
 
 PROJECT
 -------
@@ -9,7 +9,7 @@ Render API: https://ais-smartclass-api.onrender.com
 Health endpoint: https://ais-smartclass-api.onrender.com/api/health
 Render service: ais-smartclass-api (free Python web service)
 Database: Neon PostgreSQL, project "AI smart Class", production branch
-Latest verified source commit at handoff start: e2993c2
+Latest deployed source commit before current changes: 45dd16b
 
 PURPOSE AND FUNCTION
 --------------------
@@ -41,7 +41,7 @@ Build the installable debug APK from the repository root:
     ./gradlew assembleDebug
 
 Output:
-    AIClassroom_v1.0.apk
+    AIClassroom_v1.2.apk
 
 Install the APK on a phone, sign in using the class account usernames below,
 and test connection to the Render API. The last observed Render health response
@@ -50,9 +50,9 @@ switch. Recheck provider/model and PostgreSQL health after deploying the update.
 
 ACCOUNTS AND SECRETS
 --------------------
-The deterministic seed creates Class 9 sections A-D, 80 students per section,
-20 teachers, 10 subjects, four tests per subject, metrics, synthetic analysis,
-and historical rating snapshots. Seed accounts use DEMO_STUDENT_PASSWORD and
+The deterministic seed creates Class 9 sections A-D, 10 students per section
+(40 total), 20 teachers, 10 subjects, four tests per subject, metrics, sample
+analysis, and historical rating snapshots. Seed accounts use DEMO_STUDENT_PASSWORD and
 DEMO_TEACHER_PASSWORD; the production administrator uses ADMIN_USERNAME and
 ADMIN_PASSWORD. Passwords are hosting/local secrets and must never appear in
 this file, source code, APK, or public Git history.
@@ -74,49 +74,36 @@ Render URL.
 
 CURRENT WORK STATUS (2026-10-19)
 --------------------------------
-The current uncommitted UI/API update removes the backend-address control,
-provides subject-filtered student Tests/Results/Mock pages, real seeded subject
-and mock questions, timed tests with locked submissions and retry, role-scoped
-teacher class/subject reports, calendar-based history, admin class creation,
-and school-wide class/role filters. Class names and subject assignments now
-come from the backend rather than fixed Class 9 UI labels.
+The current local update makes the admin portal a student/teacher directory with
+profile CRUD and no metric ratings. Teacher workflows include overall and
+subject-specific analysis, student attempt counts, latest-first tests, editing
+before the first attempt, and soft deletion. Teachers cannot create mock tests.
+Student and teacher portals include a personalized greeting and profile page.
 
-Backend changes add test creator/duration fields, teacher-owned test lists,
-subject-constrained reports with named metric metadata, admin class creation,
-refreshable demo names/metrics/questions, and removal of stale extra enrollments
-for generated demo students. The seed generates 320 distinct Indian student
-names, 20 distinct teacher names, and five metrics: Precision, Time management,
-Critical thinking, Concept application, and Communication.
+The deterministic seed now creates 10 students in each of four sections (40
+total), 20 distinct teachers, five active metrics, 160 historical tests, and
+1,600 attempts/analyses/snapshots. Neon was refreshed and verified: 10 students
+per section, no excess generated accounts, no legacy Class 9 Algebra group, and
+all historical snapshots contain subject analysis. Four student mock tests and
+their 16 questions remain available.
 
-Latest local verification: all 18 backend tests pass with production environment
-variables stripped by the test harness; `./gradlew assembleDebug` succeeds and
-produces `AIClassroom_v1.1.apk` (versionCode 12). Rebuild with:
-    ./gradlew assembleDebug
+Latest local verification: all 21 backend tests pass and `./gradlew assembleDebug`
+produces `AIClassroom_v1.2.apk` (versionCode 13). Render still runs the prior
+deployed commit `45dd16b`; these portal/API changes are not yet pushed or
+deployed. Preserve the two root Gemini PDFs and `backend/sample.py`; they are
+user files and must remain untracked. Never include `backend/.env` in Git.
 
-Neon refresh is NOT verified. A production initializer attempt reached Neon but
-failed during the existing-seed refresh with a PostgreSQL ProgrammingError; the
-schema initializer may have committed additive columns, but the refreshed names,
-questions, metrics, and enrollment cleanup must be checked read-only and retried
-after the SQL failure is diagnosed. No commit or push of these UI changes has
-been made. Do not use the attached credentials again: the latest message exposed
-the Neon URL, OpenRouter/Gemini keys, and account passwords. Rotate them before
-any further Neon or provider requests; never include `backend/.env` in Git.
-
-Previously verified production state remains commit `e4d2850` on `master`, with
-Render health using OpenRouter/free and the earlier seeded dataset. The current
-UI/API changes are local only and have not been deployed. Preserve the two root
-Gemini PDFs and `backend/sample.py`; they are user files and must remain
-untracked. Do not push until credentials are rotated and Neon refresh is
-verified. Afterward run the full backend tests, build the APK, commit only
-intended source/docs/APK files, push, and verify Render health/login again.
+Credentials were exposed in conversation. Rotate the Neon, OpenRouter, Gemini,
+administrator, and demo-account credentials before future provider/database
+operations. Production changes above were made only with the current local
+settings; no credential values belong in this file or the APK.
 
 RESTARTING THIS TASK
 --------------------
 1. Inspect git status and this file before changing anything.
 2. Never display, commit, or paste secret values into chat or Git.
-3. Rotate Neon/OpenRouter/Gemini/account secrets exposed in conversation.
-4. Diagnose and retry the Neon refresh; verify names, class enrollments,
-   metrics, real mock questions, and historical counts read-only.
-5. Run backend tests and `./gradlew assembleDebug`, then commit/push intended
-   files only after credential rotation and database checks.
-6. Verify Render `/api/health`, role logins, and UI against the deployed commit.
+3. Rotate the exposed credentials before future production operations.
+4. Run backend tests and `./gradlew assembleDebug`.
+5. Commit/push only intended source, handoff, and APK files; never stage secrets
+    or the preserved PDFs/sample file.
+6. Verify Render `/api/health`, role logins, and the deployed commit.

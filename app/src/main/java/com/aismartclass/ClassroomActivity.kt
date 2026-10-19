@@ -70,7 +70,7 @@ private val Coral = Color(0xFFF2A78F)
 
 private data class SchoolClass(val id: String, val name: String, val year: String, val isClassTeacher: Boolean = false, val subjects: List<String> = emptyList())
 private data class SignedInUser(val id: String, val name: String, val username: String, val role: String, val isAdmin: Boolean, val token: String, val classes: List<SchoolClass>)
-private data class DigitalTest(val id: String, val title: String, val subject: String, val kind: String, val dueDate: String, val questionCount: Int, val isMock: Boolean, val completed: Boolean, val pending: Boolean, val durationMinutes: Int = 60)
+private data class DigitalTest(val id: String, val title: String, val subject: String, val kind: String, val dueDate: String, val questionCount: Int, val isMock: Boolean, val completed: Boolean, val pending: Boolean, val durationMinutes: Int = 60, val studentsTaken: Int = 0)
 private data class DigitalQuestion(val id: String, val prompt: String, val points: Double, val type: String, val options: List<String>)
 private data class TestAnalysis(val testId: String, val title: String, val subject: String, val date: String, val score: String, val maxScore: String, val rating: String, val analysis: String, val advice: String, val strengths: List<String>, val focus: List<String>)
 private data class StudentRating(val id: String, val name: String, val overall: String?, val overallAnalysis: String?, val subjects: JSONObject, val metrics: JSONObject, val asOf: String?)
@@ -102,7 +102,8 @@ private fun SmartclassRoot(context: Context) {
     var reportStudent by remember { mutableStateOf<StudentRating?>(null) }
     var reportIsClassTeacher by remember { mutableStateOf(false) }
     var showBuilder by remember { mutableStateOf(false) }
-    var builderMock by remember { mutableStateOf(false) }
+    var editingTest by remember { mutableStateOf<DigitalTest?>(null) }
+    var editingQuestions by remember { mutableStateOf(emptyList<DraftQuestion>()) }
     var showAdminDialog by remember { mutableStateOf<String?>(null) }
     var showMetricDialog by remember { mutableStateOf(false) }
     val tests = remember { mutableStateListOf<DigitalTest>() }
@@ -130,10 +131,10 @@ private fun SmartclassRoot(context: Context) {
     }
     fun refresh(current: SignedInUser, classId: String) {
         val api = SmartclassApi(backendUrl, current.token)
-        val newTests = parseTests(api.tests(classId))
+        val newTests = if (current.isAdmin) emptyList() else parseTests(api.tests(classId))
         val newAnalyses = if (current.role == "student") parseAnalyses(api.myAnalyses()) else emptyList()
-        val newRatings = if (current.role == "teacher" || current.isAdmin) parseRatings(api.classRatings(classId)) else emptyList()
-        val metricSubjects = if (current.isAdmin) newTests.map { it.subject }.distinct() else current.classes.firstOrNull { it.id == classId }?.subjects.orEmpty()
+        val newRatings = if (current.role == "teacher" && !current.isAdmin) parseRatings(api.classRatings(classId)) else emptyList()
+        val metricSubjects = if (current.role == "teacher" && !current.isAdmin) current.classes.firstOrNull { it.id == classId }?.subjects.orEmpty() else emptyList()
         val newMetrics = metricSubjects.flatMap { subject ->
             val rows = api.metrics(classId, subject)
             (0 until rows.length()).map { index -> rows.getJSONObject(index) }
@@ -222,7 +223,7 @@ private fun SmartclassRoot(context: Context) {
                         val logged = SignedInUser(profile.getString("id"), profile.getString("name"), profile.getString("username"), profile.getString("role"), profile.optBoolean("is_admin"), response.getString("access_token"), parsedClasses)
                         val firstClass = parsedClasses.firstOrNull()
                         if (firstClass != null) refresh(logged, firstClass.id)
-                        activity.runOnUiThread { user = logged; selectedClassId = firstClass?.id.orEmpty(); page = "Tests" }
+                        activity.runOnUiThread { user = logged; selectedClassId = firstClass?.id.orEmpty(); page = if (logged.isAdmin) "Admin" else "Tests" }
                     }
                 })
                 exam != null && result == null -> ExamPanel(
@@ -254,16 +255,27 @@ private fun SmartclassRoot(context: Context) {
                     onPage = { page = it },
                     onLogout = { user = null; tests.clear(); analyses.clear(); ratings.clear() },
                     onOpenTest = { openExam(it, current) },
-                    onOpenBuilder = { isMock -> builderMock = isMock; showBuilder = true },
+                    onOpenBuilder = { editingTest = null; editingQuestions = emptyList(); showBuilder = true },
+                    onEditTest = { selectedTest ->
+                        perform("Could not open test for editing") {
+                            val body = SmartclassApi(backendUrl, current.token).digitalTest(selectedTest.id)
+                            val draft = parseDraftQuestions(body.getJSONArray("questions"))
+                            activity.runOnUiThread { editingTest = selectedTest; editingQuestions = draft; showBuilder = true }
+                        }
+                    },
+                    onDeleteTest = { selectedTest ->
+                        perform("Could not delete test") {
+                            SmartclassApi(backendUrl, current.token).deleteDigitalTest(selectedTest.id)
+                            refresh(current, selectedClassId)
+                        }
+                    },
                     onReport = { item, subject -> openStudentReport(item, current, subject = subject) },
-                    onAddClass = { showAdminDialog = "class" },
                     onAddStudent = { showAdminDialog = "student" },
                     onAddTeacher = { showAdminDialog = "teacher" },
-                    onAssignTeacher = { showAdminDialog = "assignment" },
                     onEditUser = { editingAdminUser = it; showAdminDialog = "update" },
-                    onToggleUser = { selected ->
-                        perform("Could not update account") {
-                            SmartclassApi(backendUrl, current.token).adminSetActive(selected.getString("id"), !selected.optBoolean("is_active"))
+                    onDeleteUser = { selected ->
+                        perform("Could not delete account") {
+                            SmartclassApi(backendUrl, current.token).adminDeleteUser(selected.getString("id"))
                             refresh(current, selectedClassId)
                         }
                     },
@@ -272,22 +284,30 @@ private fun SmartclassRoot(context: Context) {
             }
         }
     }
-    if (showBuilder) TestBuilderDialog(initialMock = builderMock, subjects = activeClass?.subjects.orEmpty(), onDismiss = { showBuilder = false }, onPublish = { title, subject, kind, dueDate, isMock, durationMinutes, draft ->
+    if (showBuilder) TestBuilderDialog(existingTest = editingTest, initialQuestions = editingQuestions, subjects = activeClass?.subjects.orEmpty(), onDismiss = { showBuilder = false; editingTest = null; editingQuestions = emptyList() }, onPublish = { existingTest, title, subject, kind, dueDate, durationMinutes, draft ->
         val publisher = user ?: return@TestBuilderDialog
         if (draft.isEmpty()) { error = "Add at least one question before publishing." }
         if (draft.isNotEmpty()) {
             val apiUser = publisher
             perform("Could not publish test") {
                 val api = SmartclassApi(backendUrl, apiUser.token)
-                val created = api.createDigitalTest(selectedClassId, title, subject, kind, dueDate, isMock, durationMinutes)
-                val testId = created.getString("id")
-                draft.forEachIndexed { index, question ->
-                    val body = JSONObject().put("prompt", question.prompt).put("points", question.points).put("question_type", question.type).put("options", JSONArray(question.options)).put("answer_key", question.answerKey).put("position", index + 1)
-                    api.addQuestion(testId, body)
+                if (existingTest != null) {
+                    val questionBodies = JSONArray()
+                    draft.forEachIndexed { index, question ->
+                        questionBodies.put(JSONObject().put("prompt", question.prompt).put("points", question.points).put("question_type", question.type).put("options", JSONArray(question.options)).put("answer_key", question.answerKey).put("position", index + 1))
+                    }
+                    api.replaceDigitalTest(existingTest.id, JSONObject().put("title", title).put("subject", subject).put("kind", kind).put("due_date", dueDate).put("duration_minutes", durationMinutes).put("questions", questionBodies))
+                } else {
+                    val created = api.createDigitalTest(selectedClassId, title, subject, kind, dueDate, false, durationMinutes)
+                    val newTestId = created.getString("id")
+                    draft.forEachIndexed { index, question ->
+                        val body = JSONObject().put("prompt", question.prompt).put("points", question.points).put("question_type", question.type).put("options", JSONArray(question.options)).put("answer_key", question.answerKey).put("position", index + 1)
+                        api.addQuestion(newTestId, body)
+                    }
+                    api.publishTest(newTestId)
                 }
-                api.publishTest(testId)
                 refresh(apiUser, selectedClassId)
-                activity.runOnUiThread { showBuilder = false }
+                activity.runOnUiThread { showBuilder = false; editingTest = null; editingQuestions = emptyList() }
             }
         }
     })
@@ -295,7 +315,7 @@ private fun SmartclassRoot(context: Context) {
         val current = user ?: return@AnalysisDialog
         openStudentReport(reportStudent!!, current, date.takeIf(String::isNotBlank), subject)
     }, onDismiss = { report = null; reportStudent = null; reportIsClassTeacher = false })
-    if (showAdminDialog != null) AdminDialog(showAdminDialog!!, classes, editingAdminUser, onDismiss = { showAdminDialog = null; editingAdminUser = null }, onSave = { form ->
+    if (showAdminDialog != null) AdminDialog(showAdminDialog!!, classes, classes.flatMap { it.subjects }.distinct().sorted(), editingAdminUser, onDismiss = { showAdminDialog = null; editingAdminUser = null }, onSave = { form ->
         val mode = showAdminDialog ?: return@AdminDialog
         val currentUser = user ?: return@AdminDialog
         perform("Admin action failed") {
@@ -303,13 +323,14 @@ private fun SmartclassRoot(context: Context) {
             when (mode) {
                 "class" -> api.adminCreateClass(form.getString("name"), form.getString("year"))
                 "student" -> api.adminCreateStudent(form.getString("username"), form.getString("name"), form.getString("password"), form.getString("class_id"))
-                "teacher" -> api.adminCreateTeacher(form.getString("username"), form.getString("name"), form.getString("password"), JSONArray())
+                "teacher" -> api.adminCreateTeacher(form.getString("username"), form.getString("name"), form.getString("password"), form.getJSONArray("assignments"))
                 "update" -> {
                     val updates = JSONObject().put("name", form.getString("name"))
                     form.optString("new_username").takeIf(String::isNotBlank)?.let { updates.put("username", it) }
                     form.optString("password").takeIf(String::isNotBlank)?.let { updates.put("password", it) }
                     form.optString("class_id").takeIf(String::isNotBlank)?.let { updates.put("class_id", it) }
                     api.adminUpdateUser(form.getString("id"), updates)
+                    if (form.has("assignments")) api.adminSetTeacherAssignments(form.getString("id"), form.getJSONArray("assignments"))
                 }
                 else -> api.adminAssignTeacher(form.getString("teacher_id"), form.getString("class_id"), form.getString("assignment_type"), form.optString("subject").takeIf { it.isNotBlank() })
             }
@@ -354,26 +375,29 @@ private fun PortalPanel(
     user: SignedInUser, activeClass: SchoolClass?, classes: List<SchoolClass>, page: String, busy: Boolean,
     tests: List<DigitalTest>, analyses: List<TestAnalysis>, ratings: List<StudentRating>, metrics: List<JSONObject>, adminUsers: List<JSONObject>,
     onClass: (String) -> Unit, onPage: (String) -> Unit, onLogout: () -> Unit,
-    onOpenTest: (DigitalTest) -> Unit, onOpenBuilder: (Boolean) -> Unit,
-    onReport: (StudentRating, String?) -> Unit, onAddClass: () -> Unit, onAddStudent: () -> Unit, onAddTeacher: () -> Unit,
-    onAssignTeacher: () -> Unit, onEditUser: (JSONObject) -> Unit, onToggleUser: (JSONObject) -> Unit, onCreateMetric: () -> Unit
+    onOpenTest: (DigitalTest) -> Unit, onOpenBuilder: () -> Unit, onEditTest: (DigitalTest) -> Unit, onDeleteTest: (DigitalTest) -> Unit,
+    onReport: (StudentRating, String?) -> Unit, onAddStudent: () -> Unit, onAddTeacher: () -> Unit,
+    onEditUser: (JSONObject) -> Unit, onDeleteUser: (JSONObject) -> Unit, onCreateMetric: () -> Unit
 ) {
     val admin = user.isAdmin
     val teacher = user.role == "teacher" && !admin
-    val navItems = if (admin) listOf("Tests", "Class", "Admin") else if (teacher) listOf("Tests", "Class", "Metrics") else listOf("Tests", "Results", "Mock")
+    val navItems = if (admin) listOf("Admin", "Profile") else if (teacher) listOf("Tests", "Class", "Metrics", "Profile") else listOf("Tests", "Results", "Mock", "Profile")
     var testSubject by remember(user.id, activeClass?.id) { mutableStateOf("") }
     var resultSubject by remember(user.id, activeClass?.id) { mutableStateOf("") }
     var mockSubject by remember(user.id, activeClass?.id) { mutableStateOf("") }
     var classSubject by remember(user.id, activeClass?.id) { mutableStateOf("") }
     var adminClassFilter by remember(user.id) { mutableStateOf("All classes") }
     var adminRoleFilter by remember(user.id) { mutableStateOf("All roles") }
+    var pendingDeleteUser by remember { mutableStateOf<JSONObject?>(null) }
+    var pendingDeleteTest by remember { mutableStateOf<DigitalTest?>(null) }
     fun classLabel(item: SchoolClass) = if (teacher && item.isClassTeacher) "${item.name} (Class Teacher)" else item.name
     Column(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
             item {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("SMARTCLASS  /  ${activeClass?.name?.uppercase() ?: "NO CLASS"}", color = Teal, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                        Text("SMARTCLASS  /  ${if (admin) "SCHOOL" else activeClass?.name?.uppercase() ?: "NO CLASS"}", color = Teal, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                        Text("Good morning, ${user.name}", color = Teal, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                         Text(if (admin) "School admin" else "${if (teacher) "Teacher" else "Student"} portal", color = Ink, fontSize = 28.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold)
                     }
                     TextButton(onClick = onLogout) { Text("Sign out", color = Teal) }
@@ -392,6 +416,10 @@ private fun PortalPanel(
                     if (resultSubject.isBlank()) item { BlankState("Choose a subject", "Select a subject to see its test results.") }
                     else if (filtered.isEmpty()) item { BlankState("No results for this subject", "Your analyzed tests will appear here.") }
                     items(filtered) { AnalysisCard(it) }
+                }
+                "Profile" -> {
+                    item { Heading("Your profile", "ACCOUNT DETAILS") }
+                    item { ProfileDetails(user, classes) }
                 }
                 "Class" -> {
                     if (teacher || admin) item { ChoiceDropdown("Class", activeClass?.let(::classLabel).orEmpty(), classes.map(::classLabel), { selected -> classes.firstOrNull { classLabel(it) == selected }?.let { onClass(it.id) } }) }
@@ -421,35 +449,38 @@ private fun PortalPanel(
                     }
                 }
                 "Admin" -> {
-                    item { Heading("School administration", "ROSTER AND ASSIGNMENTS") }
+                    item { Heading("People directory", "STUDENTS AND TEACHERS") }
                     val adminClassOptions = listOf("All classes") + classes.map(::classLabel)
                     item { ChoiceDropdown("Class", adminClassFilter, adminClassOptions, { adminClassFilter = it }) }
-                    item { ChoiceDropdown("Role", adminRoleFilter, listOf("All roles", "Students", "Teachers", "Administrators"), { adminRoleFilter = it }) }
-                    item { ActionButton("Create class", onAddClass) }
-                    item { ActionButton("Add a student to ${activeClass?.name ?: "class"}", onAddStudent) }
-                    item { ActionButton("Add teacher", onAddTeacher) }
-                    item { ActionButton("Assign teacher to class or subject", onAssignTeacher) }
+                    item { ChoiceDropdown("People", adminRoleFilter, listOf("All roles", "Students", "Teachers"), { adminRoleFilter = it }) }
+                    item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = onAddStudent, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Teal)) { Text("Add student", color = Color.White) }; Button(onClick = onAddTeacher, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Teal)) { Text("Add teacher", color = Color.White) } } }
                     val filteredAccounts = adminUsers.filter { account ->
                         val roleMatches = when (adminRoleFilter) {
                             "Students" -> account.optString("role") == "student"
-                            "Teachers" -> account.optString("role") == "teacher" && !account.optBoolean("is_admin")
-                            "Administrators" -> account.optBoolean("is_admin")
+                            "Teachers" -> account.optString("role") == "teacher"
                             else -> true
                         }
                         val selectedClassId = classes.firstOrNull { classLabel(it) == adminClassFilter }?.id
-                        roleMatches && (adminClassFilter == "All classes" || account.optString("class_id") == selectedClassId)
+                        val assignedToClass = account.optJSONArray("assignments")?.let { assignments -> (0 until assignments.length()).any { index -> assignments.getJSONObject(index).optString("class_name") == adminClassFilter } } ?: false
+                        val classMatches = adminClassFilter == "All classes" || account.optString("class_id") == selectedClassId || account.optString("class_name") == adminClassFilter || assignedToClass
+                        roleMatches && classMatches
                     }
                     items(filteredAccounts, key = { it.getString("id") }) { account ->
+                        val assignments = account.optJSONArray("assignments") ?: JSONArray()
+                        val assignmentText = (0 until assignments.length()).map { index ->
+                            val assignment = assignments.getJSONObject(index)
+                            "${assignment.optString("class_name")} · ${if (assignment.optString("assignment_type") == "class") "Class teacher" else assignment.optString("subject")}"
+                        }.joinToString("; ")
                         Row(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(6.dp)).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(account.optString("name"), color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
-                                Text("${account.optString("username")} · ${account.optString("role")}", color = Muted, fontSize = 10.sp)
+                                Text("${account.optString("username")} · ${account.optString("role")} · ${if (account.optString("role") == "student") account.optString("class_name", "No class assigned") else assignmentText.ifBlank { "No active class assignment" }}", color = Muted, fontSize = 10.sp)
                             }
                             TextButton(onClick = { onEditUser(account) }) { Text("Edit", color = Teal) }
-                            TextButton(onClick = { onToggleUser(account) }) { Text(if (account.optBoolean("is_active")) "Disable" else "Enable", color = Coral) }
+                            TextButton(onClick = { pendingDeleteUser = account }) { Text("Delete", color = Coral) }
                         }
                     }
-                    item { BlankState("School-wide directory", "${classes.size} class groups · ${adminUsers.count { it.optString("role") == "student" }} students · ${adminUsers.count { it.optString("role") == "teacher" && !it.optBoolean("is_admin") }} teachers") }
+                    item { BlankState("School-wide directory", "${adminUsers.count { it.optString("role") == "student" }} students · ${adminUsers.count { it.optString("role") == "teacher" }} teachers") }
                 }
                 else -> {
                     if (teacher || admin) item { ChoiceDropdown("Class", activeClass?.let(::classLabel).orEmpty(), classes.map(::classLabel), { selected -> classes.firstOrNull { classLabel(it) == selected }?.let { onClass(it.id) } }) }
@@ -457,17 +488,22 @@ private fun PortalPanel(
                     val available = tests.filter { it.isMock == mockPage }
                     val subjects = if (teacher && !mockPage) activeClass?.subjects.orEmpty() else available.map { it.subject }.distinct().sorted()
                     item { Heading(if (teacher || admin) "Digital assessments" else if (mockPage) "Practice tests" else "Class assessments", if (teacher || admin) "YOUR CLASS AND TESTS" else "SELECT A SUBJECT") }
-                    if (teacher || admin) item { ActionButton("Create a digital test", { onOpenBuilder(false) }) }
-                    if (teacher) item { ActionButton("Create a mock test", { onOpenBuilder(true) }) }
+                    if (teacher) item { ActionButton("Create a digital test", onOpenBuilder) }
                     item { ChoiceDropdown("Subject", (if (mockPage) mockSubject else testSubject).ifBlank { "Select subject" }, subjects, { selected -> if (mockPage) mockSubject = selected else testSubject = selected }) }
                     val selection = if (mockPage) mockSubject else testSubject
                     val filtered = available.filter { it.subject == selection }
                     if (selection.isBlank()) item { BlankState("Choose a subject", "Tests will appear after you select their subject.") }
                     else if (filtered.isEmpty()) item { BlankState("No tests available", "There are no published ${if (mockPage) "mock" else "regular"} tests for this subject.") }
-                    items(filtered, key = { it.id }) { test -> TestCard(test, teacher || admin, onOpenTest) }
+                    items(filtered, key = { it.id }) { test -> TestCard(test, teacher || admin, onOpenTest, onEditTest, { pendingDeleteTest = it }) }
                 }
             }
         }
+    }
+    pendingDeleteUser?.let { account ->
+        AlertDialog(onDismissRequest = { pendingDeleteUser = null }, title = { Text("Delete ${account.optString("name")}?") }, text = { Text("This permanently removes the ${account.optString("role")} profile and its sign-in access.") }, confirmButton = { TextButton(onClick = { pendingDeleteUser = null; onDeleteUser(account) }) { Text("Delete", color = Coral) } }, dismissButton = { TextButton(onClick = { pendingDeleteUser = null }) { Text("Cancel", color = Muted) } })
+    }
+    pendingDeleteTest?.let { test ->
+        AlertDialog(onDismissRequest = { pendingDeleteTest = null }, title = { Text("Delete ${test.title}?") }, text = { Text("The test will be hidden from students. Existing analysis history will be retained.") }, confirmButton = { TextButton(onClick = { pendingDeleteTest = null; onDeleteTest(test) }) { Text("Delete", color = Coral) } }, dismissButton = { TextButton(onClick = { pendingDeleteTest = null }) { Text("Cancel", color = Muted) } })
     }
 }
 
@@ -498,13 +534,17 @@ private fun ChoiceDropdown(label: String, value: String, options: List<String>, 
 }
 
 @Composable
-private fun TestCard(test: DigitalTest, teacher: Boolean, onOpen: (DigitalTest) -> Unit) {
+private fun TestCard(test: DigitalTest, teacher: Boolean, onOpen: (DigitalTest) -> Unit, onEdit: (DigitalTest) -> Unit, onDelete: (DigitalTest) -> Unit) {
     Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(7.dp)).padding(15.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(test.subject.uppercase(), color = Teal, fontSize = 10.sp, fontWeight = FontWeight.Bold); Text(if (test.isMock) "MOCK" else test.dueDate, color = Muted, fontSize = 10.sp) }
         Text(test.title, color = Ink, fontSize = 18.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 5.dp))
         Text("${test.questionCount} questions  ·  ${test.kind}", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp, bottom = 10.dp))
         if (teacher) {
-            Text("Digital paper published  ·  ${test.questionCount} questions", color = Muted, fontSize = 11.sp)
+            Text("${test.studentsTaken} students have attempted this test", color = Muted, fontSize = 11.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                if (test.studentsTaken == 0 && !test.isMock) TextButton(onClick = { onEdit(test) }) { Text("Edit", color = Teal) }
+                if (!test.isMock) TextButton(onClick = { onDelete(test) }) { Text("Delete", color = Coral) }
+            }
         } else {
             val action = when { test.isMock -> "Try mock test"; test.pending -> "Retry AI analysis"; test.completed -> "Completed"; else -> "Start test" }
             Button(onClick = { onOpen(test) }, enabled = test.isMock || !test.completed, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Teal), shape = RoundedCornerShape(5.dp)) { Text(action, color = Color.White) }
@@ -648,11 +688,17 @@ private fun AnalysisDialog(report: JSONObject, student: StudentRating, isClassTe
             }
             if (selectedSubject.isNotBlank()) {
                 val subjectRating = subjectRatings.optDouble(selectedSubject, Double.NaN)
+                val subjectNarrative = (report.optJSONObject("subject_analyses") ?: JSONObject()).optJSONObject(selectedSubject)
                 val selectedMetricRatings = (report.optJSONObject("metric_ratings") ?: JSONObject()).let { metrics ->
                     metrics.keys().asSequence().mapNotNull { key -> metrics.optJSONObject(key)?.let { key to it } }
                         .filter { it.second.optString("subject") == selectedSubject }
                 }
                 if (!subjectRating.isNaN()) item { Text("$selectedSubject rating · ${String.format("%.1f", subjectRating)}/10", color = Teal, fontWeight = FontWeight.Bold) }
+                subjectNarrative?.let { narrative ->
+                    item { Text("Subject analysis", color = Teal, fontWeight = FontWeight.Bold) }
+                    item { Text(narrative.optString("analysis"), color = Ink, fontSize = 12.sp) }
+                    item { Text("Advice: ${narrative.optString("advice")}", color = Muted, fontSize = 12.sp) }
+                }
                 selectedMetricRatings.forEach { (_, metric) -> item { Text("${metric.optString("name")} · ${metric.optString("rating")}/10", color = Muted, fontSize = 11.sp) } }
                 if (subjectTests.isEmpty()) item { BlankState("No tests for this subject", "No analyzed test history is available for this subject on this date.") }
                 else {
@@ -676,20 +722,19 @@ private fun AnalysisDialog(report: JSONObject, student: StudentRating, isClassTe
 }
 
 @Composable
-private fun TestBuilderDialog(initialMock: Boolean, subjects: List<String>, onDismiss: () -> Unit, onPublish: (String, String, String, String, Boolean, Int, List<DraftQuestion>) -> Unit) {
+private fun TestBuilderDialog(existingTest: DigitalTest?, initialQuestions: List<DraftQuestion>, subjects: List<String>, onDismiss: () -> Unit, onPublish: (DigitalTest?, String, String, String, String, Int, List<DraftQuestion>) -> Unit) {
     val context = LocalContext.current
-    var title by remember { mutableStateOf("") }
-    var subject by remember(subjects) { mutableStateOf(subjects.firstOrNull() ?: "Mathematics") }
-    var date by remember { mutableStateOf(Calendar.getInstance().let { String.format("%04d-%02d-%02d", it.get(Calendar.YEAR), it.get(Calendar.MONTH) + 1, it.get(Calendar.DAY_OF_MONTH)) }) }
-    var duration by remember { mutableStateOf("45") }
+    var title by remember(existingTest?.id) { mutableStateOf(existingTest?.title.orEmpty()) }
+    var subject by remember(existingTest?.id, subjects) { mutableStateOf(existingTest?.subject ?: subjects.firstOrNull() ?: "Mathematics") }
+    var date by remember(existingTest?.id) { mutableStateOf(existingTest?.dueDate?.takeIf(String::isNotBlank) ?: Calendar.getInstance().let { String.format("%04d-%02d-%02d", it.get(Calendar.YEAR), it.get(Calendar.MONTH) + 1, it.get(Calendar.DAY_OF_MONTH)) }) }
+    var duration by remember(existingTest?.id) { mutableStateOf((existingTest?.durationMinutes ?: 45).toString()) }
     var prompt by remember { mutableStateOf("") }
     var points by remember { mutableStateOf("2") }
     var type by remember { mutableStateOf("mcq") }
     var options by remember { mutableStateOf("") }
     var answerKey by remember { mutableStateOf("") }
-    var mock by remember { mutableStateOf(initialMock) }
-    val draft = remember { mutableStateListOf<DraftQuestion>() }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Build digital test", color = Ink, fontFamily = FontFamily.Serif) }, text = {
+    val draft = remember(existingTest?.id) { mutableStateListOf<DraftQuestion>().apply { addAll(initialQuestions) } }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(if (existingTest == null) "Build digital test" else "Edit digital test", color = Ink, fontFamily = FontFamily.Serif) }, text = {
         LazyColumn(Modifier.height(520.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             item { OutlinedTextField(title, { title = it }, label = { Text("Test title") }, singleLine = true) }
             item { ChoiceDropdown("Subject", subject, subjects.ifEmpty { listOf(subject) }) { subject = it } }
@@ -698,7 +743,7 @@ private fun TestBuilderDialog(initialMock: Boolean, subjects: List<String>, onDi
                 DatePickerDialog(context, { _, year, month, day -> date = String.format("%04d-%02d-%02d", year, month + 1, day) }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show()
             }, modifier = Modifier.fillMaxWidth()) { Text("Due date · $date") } }
             item { OutlinedTextField(duration, { duration = it.filter(Char::isDigit).take(3) }, label = { Text("Time limit (minutes, 1-240)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true) }
-            item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { TextButton(onClick = { type = "mcq" }) { Text(if (type == "mcq") "• MCQ" else "MCQ", color = Teal) }; TextButton(onClick = { type = "subjective" }) { Text(if (type == "subjective") "• Written" else "Written", color = Teal) }; TextButton(onClick = { mock = !mock }) { Text(if (mock) "• Mock" else "Persistent", color = Teal) } } }
+            item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { TextButton(onClick = { type = "mcq" }) { Text(if (type == "mcq") "• MCQ" else "MCQ", color = Teal) }; TextButton(onClick = { type = "subjective" }) { Text(if (type == "subjective") "• Written" else "Written", color = Teal) } } }
             item { OutlinedTextField(prompt, { prompt = it }, label = { Text("Question") }, minLines = 2) }
             item { OutlinedTextField(points, { points = it.filter { char -> char.isDigit() || char == '.' } }, label = { Text("Points") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true) }
             if (type == "mcq") {
@@ -715,46 +760,79 @@ private fun TestBuilderDialog(initialMock: Boolean, subjects: List<String>, onDi
             }, modifier = Modifier.fillMaxWidth()) { Text("Add question (${draft.size})") } }
             items(draft) { Text("${draft.size}. ${it.type.uppercase()} · ${it.prompt}", color = Muted, fontSize = 11.sp) }
         }
-    }, confirmButton = { TextButton(onClick = { duration.toIntOrNull()?.takeIf { it in 1..240 }?.let { minutes -> if (title.isNotBlank() && subject.isNotBlank() && draft.isNotEmpty()) onPublish(title, subject, "Assessment", date, mock, minutes, draft.toList()) } }) { Text("Publish", color = Teal) } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Muted) } })
+    }, confirmButton = { TextButton(onClick = { duration.toIntOrNull()?.takeIf { it in 1..240 }?.let { minutes -> if (title.isNotBlank() && subject.isNotBlank() && draft.isNotEmpty()) onPublish(existingTest, title, subject, "Assessment", date, minutes, draft.toList()) } }) { Text(if (existingTest == null) "Publish" else "Save changes", color = Teal) } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Muted) } })
 }
 
 @Composable
-private fun AdminDialog(mode: String, classes: List<SchoolClass>, editingUser: JSONObject?, onDismiss: () -> Unit, onSave: (JSONObject) -> Unit) {
+private fun AdminDialog(mode: String, classes: List<SchoolClass>, subjects: List<String>, editingUser: JSONObject?, onDismiss: () -> Unit, onSave: (JSONObject) -> Unit) {
     var username by remember(mode, editingUser?.optString("id")) { mutableStateOf(editingUser?.optString("id").orEmpty()) }
     var name by remember(mode, editingUser?.optString("name")) { mutableStateOf(editingUser?.optString("name").orEmpty()) }
     var password by remember { mutableStateOf("") }
     var newUsername by remember { mutableStateOf("") }
     var classId by remember(mode, editingUser?.optString("class_id")) { mutableStateOf(editingUser?.optString("class_id")?.takeIf(String::isNotBlank) ?: classes.firstOrNull()?.id.orEmpty()) }
-    var schoolYear by remember(mode) { mutableStateOf("2026 / 27") }
-    var teacherId by remember { mutableStateOf("") }
-    var subject by remember { mutableStateOf("Mathematics") }
-    var classTeacher by remember { mutableStateOf(false) }
-    val title = when (mode) { "class" -> "Create class"; "student" -> "Add student"; "teacher" -> "Add teacher"; "update" -> "Edit account"; else -> "Assign teacher" }
+    var assignmentClassId by remember(mode, editingUser?.optString("id")) { mutableStateOf(classes.firstOrNull()?.id.orEmpty()) }
+    var assignmentSubject by remember(mode, subjects) { mutableStateOf(subjects.firstOrNull().orEmpty()) }
+    var assignmentClassTeacher by remember(mode, editingUser?.optString("id")) { mutableStateOf(false) }
+    val assignmentRows = remember(mode, editingUser?.optString("id")) {
+        mutableStateListOf<JSONObject>().apply {
+            val existing = editingUser?.optJSONArray("assignments") ?: JSONArray()
+            for (index in 0 until existing.length()) add(existing.getJSONObject(index))
+        }
+    }
+    val editingTeacher = mode == "update" && editingUser?.optString("role") == "teacher"
+    val title = when (mode) { "student" -> "Add student"; "teacher" -> "Add teacher"; else -> "Edit ${editingUser?.optString("role") ?: "profile"}" }
     AlertDialog(onDismissRequest = onDismiss, title = { Text(title, color = Ink, fontFamily = FontFamily.Serif) }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            if (mode == "class") {
-                OutlinedTextField(name, { name = it }, label = { Text("Class and section name") }, singleLine = true)
-                OutlinedTextField(schoolYear, { schoolYear = it }, label = { Text("School year") }, singleLine = true)
+        LazyColumn(Modifier.height(440.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            item { OutlinedTextField(username, { username = it }, label = { Text(if (mode == "update") "Username" else "Username") }, singleLine = true, enabled = mode != "update") }
+            item { OutlinedTextField(name, { name = it }, label = { Text("Full name") }, singleLine = true) }
+            if (mode == "update") item { OutlinedTextField(newUsername, { newUsername = it }, label = { Text("New username (optional)") }, singleLine = true) }
+            item { OutlinedTextField(password, { password = it }, label = { Text(if (mode == "update") "New password (optional)" else "Password (10+ characters)") }, singleLine = true, visualTransformation = PasswordVisualTransformation()) }
+            if (mode == "student") item {
+                ChoiceDropdown("Class", classes.firstOrNull { it.id == classId }?.name ?: "Select class", classes.map { it.name }) { selected -> classId = classes.firstOrNull { it.name == selected }?.id.orEmpty() }
             }
-            if (mode != "assignment" && mode != "class") {
-                OutlinedTextField(username, { username = it }, label = { Text(if (mode == "update") "Account username / ID" else "Username") }, singleLine = true, enabled = mode != "update")
-                OutlinedTextField(name, { name = it }, label = { Text("Full name") }, singleLine = true)
-                if (mode == "update") OutlinedTextField(newUsername, { newUsername = it }, label = { Text("New username (optional)") }, singleLine = true)
-                OutlinedTextField(password, { password = it }, label = { Text(if (mode == "update") "New password (optional)" else "Password (10+ characters)") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
-            }
-            if (mode == "assignment") OutlinedTextField(teacherId, { teacherId = it }, label = { Text("Teacher username") }, singleLine = true)
-            if (mode != "class") ChoiceDropdown("Class", classes.firstOrNull { it.id == classId }?.name ?: "Select class", classes.map { it.name }) { selected -> classId = classes.firstOrNull { it.name == selected }?.id.orEmpty() }
-            if (mode == "assignment") {
-                OutlinedTextField(subject, { subject = it }, label = { Text("Subject (blank for class teacher)") }, singleLine = true)
-                TextButton(onClick = { classTeacher = !classTeacher }) { Text(if (classTeacher) "Assignment: class teacher" else "Assignment: subject teacher", color = Teal) }
+            if (mode == "teacher" || editingTeacher) {
+                item { Heading("Teaching assignments", "PROFILE ACCESS") }
+                item { ChoiceDropdown("Class", classes.firstOrNull { it.id == assignmentClassId }?.name ?: "Select class", classes.map { it.name }) { selected -> assignmentClassId = classes.firstOrNull { it.name == selected }?.id.orEmpty() } }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { assignmentClassTeacher = false }) { Text(if (!assignmentClassTeacher) "• Subject teacher" else "Subject teacher", color = Teal) }
+                        TextButton(onClick = { assignmentClassTeacher = true }) { Text(if (assignmentClassTeacher) "• Class teacher" else "Class teacher", color = Teal) }
+                    }
+                }
+                if (!assignmentClassTeacher) item { ChoiceDropdown("Subject", assignmentSubject.ifBlank { "Select subject" }, subjects, { assignmentSubject = it }) }
+                item {
+                    TextButton(onClick = {
+                        val assignmentType = if (assignmentClassTeacher) "class" else "subject"
+                        val assignmentValue = if (assignmentClassTeacher) JSONObject.NULL else assignmentSubject
+                        val exists = assignmentRows.any { it.optString("class_id") == assignmentClassId && it.optString("assignment_type") == assignmentType && it.optString("subject") == if (assignmentValue === JSONObject.NULL) "" else assignmentSubject }
+                        if (assignmentClassId.isNotBlank() && (assignmentClassTeacher || assignmentSubject.isNotBlank()) && !exists) {
+                            assignmentRows.add(JSONObject().put("class_id", assignmentClassId).put("assignment_type", assignmentType).put("subject", assignmentValue))
+                        }
+                    }) { Text("Add assignment", color = Teal) }
+                }
+                items(assignmentRows.size) { index ->
+                    val assignment = assignmentRows[index]
+                    val className = classes.firstOrNull { it.id == assignment.optString("class_id") }?.name ?: assignment.optString("class_name")
+                    val label = if (assignment.optString("assignment_type") == "class") "$className · Class teacher" else "$className · ${assignment.optString("subject")}"
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, color = Ink, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { assignmentRows.removeAt(index) }) { Text("Remove", color = Coral) }
+                    }
+                }
             }
         }
     }, confirmButton = { TextButton(onClick = {
-        if (mode == "class" && name.isNotBlank() && schoolYear.isNotBlank()) onSave(JSONObject().put("name", name).put("year", schoolYear))
-        if (mode == "student" && username.isNotBlank() && name.isNotBlank() && password.length >= 10) onSave(JSONObject().put("username", username).put("name", name).put("password", password).put("class_id", classId))
-        if (mode == "teacher" && username.isNotBlank() && name.isNotBlank() && password.length >= 10) onSave(JSONObject().put("username", username).put("name", name).put("password", password))
-        if (mode == "update" && username.isNotBlank() && name.isNotBlank() && (password.isBlank() || password.length >= 10)) onSave(JSONObject().put("id", username).put("name", name).put("new_username", newUsername).put("password", password).put("class_id", if (editingUser?.optString("role") == "student") classId else ""))
-        if (mode == "assignment" && teacherId.isNotBlank()) onSave(JSONObject().put("teacher_id", teacherId).put("class_id", classId).put("assignment_type", if (classTeacher) "class" else "subject").put("subject", if (classTeacher) JSONObject.NULL else subject))
+        val assignments = JSONArray()
+        assignmentRows.forEach { assignment ->
+            assignments.put(JSONObject().put("teacher_id", username).put("class_id", assignment.getString("class_id")).put("assignment_type", assignment.getString("assignment_type")).put("subject", assignment.opt("subject") ?: JSONObject.NULL))
+        }
+        if (mode == "student" && username.isNotBlank() && name.isNotBlank() && password.length >= 10 && classId.isNotBlank()) onSave(JSONObject().put("username", username).put("name", name).put("password", password).put("class_id", classId))
+        if (mode == "teacher" && username.isNotBlank() && name.isNotBlank() && password.length >= 10 && assignmentRows.isNotEmpty()) onSave(JSONObject().put("username", username).put("name", name).put("password", password).put("assignments", assignments))
+        if (mode == "update" && username.isNotBlank() && name.isNotBlank() && (password.isBlank() || password.length >= 10)) {
+            val form = JSONObject().put("id", username).put("name", name).put("new_username", newUsername).put("password", password).put("class_id", if (editingUser?.optString("role") == "student") classId else "")
+            if (editingTeacher) form.put("assignments", assignments)
+            onSave(form)
+        }
     }) { Text("Save", color = Teal) } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Muted) } })
 }
 
@@ -778,19 +856,43 @@ private fun ActionButton(label: String, onClick: () -> Unit) {
 }
 
 @Composable
+private fun ProfileDetails(user: SignedInUser, classes: List<SchoolClass>) {
+    Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(6.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(user.name, color = Ink, fontSize = 20.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold)
+        Text("${if (user.isAdmin) "Administrator" else user.role.replaceFirstChar(Char::uppercase)} · ${user.username}", color = Muted, fontSize = 12.sp)
+        if (classes.isEmpty()) Text("No class assignments", color = Muted, fontSize = 12.sp)
+        if (!user.isAdmin) classes.forEach { schoolClass ->
+            val assignment = when {
+                user.role == "student" -> "Student · ${schoolClass.name}"
+                schoolClass.isClassTeacher -> "${schoolClass.name} · Class teacher"
+                schoolClass.subjects.isNotEmpty() -> "${schoolClass.name} · ${schoolClass.subjects.joinToString() }"
+                else -> schoolClass.name
+            }
+            Text(assignment, color = Teal, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
 private fun BlankState(title: String, message: String) {
     Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(6.dp)).padding(16.dp)) { Text(title, color = Ink, fontWeight = FontWeight.SemiBold); Text(message, color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp)) }
 }
 
 private fun parseTests(array: JSONArray): List<DigitalTest> = (0 until array.length()).map { index ->
     val item = array.getJSONObject(index)
-    DigitalTest(item.getString("id"), item.getString("title"), item.getString("subject"), item.optString("kind"), item.optString("due_date"), item.optInt("question_count"), item.optBoolean("is_mock"), item.optBoolean("completed"), item.optBoolean("pending"), item.optInt("duration_minutes", 60))
+    DigitalTest(item.getString("id"), item.getString("title"), item.getString("subject"), item.optString("kind"), item.optString("due_date"), item.optInt("question_count"), item.optBoolean("is_mock"), item.optBoolean("completed"), item.optBoolean("pending"), item.optInt("duration_minutes", 60), item.optInt("students_taken"))
 }
 
 private fun parseQuestions(array: JSONArray): List<DigitalQuestion> = (0 until array.length()).map { index ->
     val item = array.getJSONObject(index)
     val options = item.optJSONArray("options") ?: JSONArray()
     DigitalQuestion(item.getString("id"), item.getString("prompt"), item.optDouble("points", 1.0), item.optString("question_type", "subjective"), (0 until options.length()).map { options.getString(it) })
+}
+
+private fun parseDraftQuestions(array: JSONArray): List<DraftQuestion> = (0 until array.length()).map { index ->
+    val item = array.getJSONObject(index)
+    val options = item.optJSONArray("options") ?: JSONArray()
+    DraftQuestion(item.getString("prompt"), item.optDouble("points", 1.0), item.optString("question_type", "subjective"), (0 until options.length()).map { options.getString(it) }, item.opt("answer_key") ?: "")
 }
 
 private fun parseAnalyses(array: JSONArray): List<TestAnalysis> = (0 until array.length()).map { index ->

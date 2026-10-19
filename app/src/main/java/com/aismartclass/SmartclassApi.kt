@@ -53,6 +53,12 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
             .put("is_mock", isMock)
             .put("duration_minutes", durationMinutes))
 
+    fun replaceDigitalTest(testId: String, body: JSONObject): JSONObject =
+        requestJson("/api/tests/$testId", "PUT", body)
+
+    fun deleteDigitalTest(testId: String): JSONObject =
+        requestJson("/api/tests/$testId", "DELETE", JSONObject())
+
     fun addQuestion(testId: String, question: JSONObject): JSONObject =
         requestJson("/api/tests/$testId/questions", "POST", question)
 
@@ -84,6 +90,12 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
 
     fun adminUpdateUser(userId: String, updates: JSONObject): JSONObject =
         requestJson("/api/admin/users/$userId", "PATCH", updates)
+
+    fun adminDeleteUser(userId: String): JSONObject =
+        requestJson("/api/admin/users/$userId", "DELETE", JSONObject())
+
+    fun adminSetTeacherAssignments(userId: String, assignments: JSONArray): JSONObject =
+        requestJson("/api/admin/teachers/$userId/assignments", "PUT", JSONObject().put("assignments", assignments))
 
     fun adminAssignTeacher(teacherId: String, classId: String, assignmentType: String, subject: String?): JSONObject =
         requestJson("/api/admin/assignments", "POST", JSONObject().put("teacher_id", teacherId).put("class_id", classId).put("assignment_type", assignmentType).put("subject", subject))

@@ -193,11 +193,20 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(stored[question_ids[1]], "")
 
     def test_student_test_listing_filters_by_subject_and_mock_mode(self):
+        self.user = {"id": "teacher01", "name": "Teacher One", "username": "teacher01", "role": "teacher", "is_admin": 0}
+        created = self.client.post("/api/tests", json={"class_id": "class9-a", "title": "Newest Algebra", "subject": "Mathematics", "due_date": "2026-10-19"})
+        self.assertEqual(created.status_code, 200, created.text)
+        test_id = created.json()["id"]
+        question = self.client.post(f"/api/tests/{test_id}/questions", json={"prompt": "Explain one method.", "points": 1, "question_type": "subjective", "answer_key": "A valid method."})
+        self.assertEqual(question.status_code, 200, question.text)
+        self.assertEqual(self.client.post(f"/api/tests/{test_id}/publish").status_code, 200)
         self.user = {"id": "student9a001", "name": "Student One", "username": "student9a001", "role": "student", "is_admin": 0}
         regular = self.client.get("/api/classes/class9-a/tests?subject=Mathematics&is_mock=false")
         self.assertEqual(regular.status_code, 200, regular.text)
         self.assertTrue(regular.json())
         self.assertTrue(all(item["subject"] == "Mathematics" and not item["is_mock"] for item in regular.json()))
+        self.assertEqual(regular.json()[0]["id"], test_id)
+        self.assertEqual(regular.json()[0]["due_date"], max(item["due_date"] for item in regular.json() if item["due_date"]))
         mock = self.client.get("/api/classes/class9-a/tests?is_mock=true")
         self.assertEqual(len(mock.json()), 1)
         self.assertTrue(mock.json()[0]["is_mock"])
@@ -273,6 +282,8 @@ class SchoolApiTests(unittest.TestCase):
         subject_report = self.client.get(f"/api/classes/class9-b/students/{student_id}/analysis?subject=Mathematics")
         self.assertEqual(subject_report.status_code, 200, subject_report.text)
         self.assertTrue(all(item["subject"] == "Mathematics" for item in subject_report.json()["tests"]))
+        self.assertEqual(set(subject_report.json()["subject_analyses"]), {"Mathematics"})
+        self.assertTrue(subject_report.json()["subject_analyses"]["Mathematics"]["analysis"])
         historical = self.client.get(f"/api/classes/class9-b/students/{student_id}/analysis?as_of=2026-01-15")
         self.assertEqual(historical.status_code, 200, historical.text)
         self.assertTrue(historical.json()["as_of"].startswith("2026-01-15"))
@@ -281,10 +292,49 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(class_teacher_report.status_code, 200, class_teacher_report.text)
         self.assertIsNotNone(class_teacher_report.json()["overall"]["rating"])
         self.assertEqual(len(class_teacher_report.json()["subject_ratings"]), 10)
+        self.assertEqual(len(class_teacher_report.json()["subject_analyses"]), 10)
         self.assertEqual(len(class_teacher_report.json()["metric_ratings"]), 5)
 
+    def test_teacher_tests_report_counts_and_cannot_be_edited_after_attempt(self):
+        test_id, _ = self._create_test()
+        listing = self.client.get("/api/classes/class9-b/tests?subject=Mathematics&is_mock=false")
+        test = next(item for item in listing.json() if item["id"] == test_id)
+        self.assertEqual(test["students_taken"], 0)
+        edited = self.client.put(f"/api/tests/{test_id}", json={
+            "title": "Updated Algebra Check",
+            "subject": "Mathematics",
+            "kind": "Assessment",
+            "due_date": "2026-10-20",
+            "duration_minutes": 30,
+            "questions": [{"prompt": "What is 3 + 3?", "points": 2, "question_type": "mcq", "options": ["5", "6"], "answer_key": 1}],
+        })
+        self.assertEqual(edited.status_code, 200, edited.text)
+        question = self.client.get(f"/api/tests/{test_id}").json()["questions"][0]
+        self.assertEqual(question["prompt"], "What is 3 + 3?")
+        self.user = {"id": "student9b002", "name": "Student Two", "username": "student9b002", "role": "student", "is_admin": 0}
+        with patch.object(main, "get_structured_test_analysis", return_value=self._fake_analysis()):
+            submitted = self.client.post(f"/api/tests/{test_id}/attempts", json={"answers": {question["id"]: 1}})
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        self.user = {"id": "teacher01", "name": "Teacher One", "username": "teacher01", "role": "teacher", "is_admin": 0}
+        blocked = self.client.put(f"/api/tests/{test_id}", json={
+            "title": "Too late", "subject": "Mathematics", "kind": "Assessment", "duration_minutes": 30,
+            "questions": [{"prompt": "Edit after attempt?", "points": 1, "question_type": "subjective", "answer_key": "No"}],
+        })
+        self.assertEqual(blocked.status_code, 409)
+        updated_listing = self.client.get("/api/classes/class9-b/tests?subject=Mathematics&is_mock=false")
+        self.assertEqual(next(item for item in updated_listing.json() if item["id"] == test_id)["students_taken"], 1)
+        deleted = self.client.delete(f"/api/tests/{test_id}")
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertFalse(any(item["id"] == test_id for item in self.client.get("/api/classes/class9-b/tests?subject=Mathematics&is_mock=false").json()))
+
+    def test_teacher_cannot_create_mock_test(self):
+        response = self.client.post("/api/tests", json={"class_id": "class9-b", "title": "Teacher mock", "subject": "Mathematics", "is_mock": True})
+        self.assertEqual(response.status_code, 400)
+
     def test_mock_submission_is_not_saved_and_other_subject_teacher_is_denied(self):
-        test_id, question_ids = self._create_test(is_mock=True)
+        test_id = "mock-general-knowledge-b"
+        with main.closing(main.connect()) as db:
+            question_ids = [row["id"] for row in db.execute("SELECT id FROM questions WHERE test_id=? ORDER BY position", (test_id,))]
         self.user = {"id": "student9b001", "name": "Student One", "username": "student9b001", "role": "student", "is_admin": 0}
         payload = {"answers": {question_ids[0]: 1, question_ids[1]: "Four, by adding two and two."}, "is_mock": True}
         with main.closing(main.connect()) as db:
@@ -331,13 +381,16 @@ class SchoolApiTests(unittest.TestCase):
         classes = self.client.get("/api/admin/classes")
         self.assertEqual(classes.status_code, 200, classes.text)
         self.assertEqual(len(classes.json()), 4)
+        directory = self.client.get("/api/admin/users")
+        self.assertEqual(directory.status_code, 200, directory.text)
+        self.assertTrue(all(item["role"] in {"student", "teacher"} and not item["is_admin"] for item in directory.json()))
         created_class = self.client.post("/api/admin/classes", json={"name": "Class 8 Section A", "year": "2026 / 27"})
         self.assertEqual(created_class.status_code, 200, created_class.text)
         duplicate_class = self.client.post("/api/admin/classes", json={"name": "class 8 section a", "year": "2026 / 27"})
         self.assertEqual(duplicate_class.status_code, 409)
         admin_ratings = self.client.get("/api/classes/class9-a/ratings")
-        self.assertEqual(admin_ratings.status_code, 200, admin_ratings.text)
-        self.assertEqual(len(admin_ratings.json()[0]["metric_ratings"]), 50)
+        self.assertEqual(admin_ratings.status_code, 403)
+        self.assertEqual(self.client.get("/api/classes/class9-a/students/student9a001/analysis").status_code, 403)
         student = self.client.post("/api/admin/students", json={"username": "newstudent", "name": "New Student", "password": "long-enough-test-password", "class_id": "class9-a"})
         self.assertEqual(student.status_code, 200, student.text)
         updated_student = self.client.patch(f"/api/admin/users/{student.json()['id']}", json={"name": "Updated Student", "password": "another-long-test-password", "class_id": "class9-d"})
@@ -345,31 +398,44 @@ class SchoolApiTests(unittest.TestCase):
         with main.closing(main.connect()) as db:
             self.assertEqual(db.execute("SELECT name FROM users WHERE id=?", (student.json()["id"],)).fetchone()["name"], "Updated Student")
             self.assertEqual(db.execute("SELECT class_id FROM enrollments WHERE student_id=?", (student.json()["id"],)).fetchone()["class_id"], "class9-d")
+        deleted_student = self.client.delete(f"/api/admin/users/{student.json()['id']}")
+        self.assertEqual(deleted_student.status_code, 200, deleted_student.text)
+        self.assertEqual(self.client.delete("/api/admin/users/admin-test").status_code, 404)
         teacher = self.client.post("/api/admin/teachers", json={"username": "newteacher", "name": "New Teacher", "password": "long-enough-test-password", "assignments": [{"teacher_id": "newteacher", "class_id": "class9-a", "assignment_type": "subject", "subject": "Biology"}]})
         self.assertEqual(teacher.status_code, 200, teacher.text)
         assignment = self.client.post("/api/admin/assignments", json={"teacher_id": "newteacher", "class_id": "class9-c", "assignment_type": "class", "subject": None})
         self.assertEqual(assignment.status_code, 200, assignment.text)
+        profile = next(item for item in self.client.get("/api/admin/users?role=teacher").json() if item["id"] == "newteacher")
+        self.assertEqual({item["class_id"] for item in profile["assignments"]}, {"class9-a", "class9-c"})
+        updated_assignments = self.client.put("/api/admin/teachers/newteacher/assignments", json={"assignments": [{"class_id": "class9-a", "assignment_type": "subject", "subject": "Physics"}]})
+        self.assertEqual(updated_assignments.status_code, 200, updated_assignments.text)
+        profile = next(item for item in self.client.get("/api/admin/users?role=teacher").json() if item["id"] == "newteacher")
+        self.assertEqual([(item["class_id"], item["subject"]) for item in profile["assignments"]], [("class9-a", "Physics")])
         with main.closing(main.connect()) as db:
             subject_assignment_id = db.execute("SELECT id FROM teacher_assignments WHERE teacher_id=? AND class_id=? AND assignment_type='subject'", ("newteacher", "class9-a")).fetchone()["id"]
         revoked = self.client.delete(f"/api/admin/assignments/{subject_assignment_id}")
         self.assertEqual(revoked.status_code, 200, revoked.text)
         assignment_id = assignment.json()["id"]
-        self.assertEqual(self.client.delete(f"/api/admin/assignments/{assignment_id}").status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/admin/assignments/{assignment_id}").status_code, 404)
+        self.assertEqual(self.client.delete(f"/api/admin/users/{teacher.json()['id']}").status_code, 200)
         self.user = {"id": "newteacher", "name": "New Teacher", "username": "newteacher", "role": "teacher", "is_admin": 0}
         self.assertEqual(self.client.get("/api/classes/class9-a/tests").status_code, 403)
 
     def test_demo_seed_has_requested_roster_and_history(self):
         with main.closing(main.connect()) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM classes WHERE id LIKE 'class9-%'").fetchone()[0], 4)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM users WHERE role='student' AND username LIKE 'student9%' ").fetchone()[0], 320)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM users WHERE role='student' AND username LIKE 'student9%' ").fetchone()[0], 40)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM users WHERE role='teacher' AND username LIKE 'teacher%' ").fetchone()[0], 20)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM tests WHERE is_mock=0 AND id LIKE 'test-class9-%'").fetchone()[0], 160)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM test_analyses WHERE test_id LIKE 'test-class9-%'").fetchone()[0], 12800)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM test_analyses WHERE test_id LIKE 'test-class9-%'").fetchone()[0], 1600)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM student_analysis_snapshots WHERE source_test_id LIKE 'test-class9-%'").fetchone()[0], 1600)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM teacher_assignments WHERE assignment_type='class' AND id LIKE 'class-teacher-class9-%'").fetchone()[0], 4)
             january = db.execute("SELECT subject_ratings_json FROM student_analysis_snapshots WHERE student_id=? AND snapshot_at LIKE '2026-01-15%' ORDER BY id DESC LIMIT 1", ("student9a001",)).fetchone()
             self.assertEqual(len(json.loads(january["subject_ratings_json"])), 10)
+            january_analyses = db.execute("SELECT subject_analyses_json FROM student_analysis_snapshots WHERE student_id=? AND snapshot_at LIKE '2026-01-15%' ORDER BY id DESC LIMIT 1", ("student9a001",)).fetchone()
+            self.assertEqual(len(json.loads(january_analyses["subject_analyses_json"])), 10)
             student_names = [row["name"] for row in db.execute("SELECT name FROM users WHERE role='student' AND username LIKE 'student9%'")]
-            self.assertEqual(len(set(student_names)), 320)
+            self.assertEqual(len(set(student_names)), 40)
             self.assertFalse(any(any(character.isdigit() for character in name) for name in student_names))
             teacher_names = [row["name"] for row in db.execute("SELECT name FROM users WHERE role='teacher' AND username LIKE 'teacher%'")]
             self.assertEqual(len(set(teacher_names)), 20)
@@ -383,8 +449,13 @@ class SchoolApiTests(unittest.TestCase):
 
     def test_seed_refresh_removes_stale_class_enrollment(self):
         with main.closing(main.connect()) as db:
-            db.execute("INSERT INTO classes(id,name,year,teacher_id) VALUES(?,?,?,NULL)", ("legacy-algebra", "Class 9 Algebra", "2026"))
-            db.execute("INSERT INTO enrollments(class_id,student_id) VALUES(?,?)", ("legacy-algebra", "student9a001"))
+            db.execute("INSERT INTO classes(id,name,year,teacher_id) VALUES(?,?,?,NULL)", ("class9-algebra", "Class 9 - Algebra", "2026"))
+            db.execute("INSERT INTO enrollments(class_id,student_id) VALUES(?,?)", ("class9-algebra", "student9a001"))
+            db.execute("INSERT INTO users(id,name,role,username,is_admin,is_active) VALUES(?,?,?,?,0,1)", ("student9a011", "Aanya Sharma", "student", "student9a011"))
+            db.execute("INSERT INTO enrollments(class_id,student_id) VALUES(?,?)", ("class9-a", "student9a011"))
+            db.execute("INSERT INTO test_attempts(id,test_id,student_id,answers_json,status,submitted_at,is_mock) VALUES(?,?,?,?,?,?,0)", ("extra-attempt", "test-class9-a-0-1", "student9a011", "{}", "analysed", "2026-01-15T08:00:00+00:00"))
+            db.execute("INSERT INTO test_analyses(id,attempt_id,test_id,student_id,result_json,created_at) VALUES(?,?,?,?,?,?)", ("extra-analysis", "extra-attempt", "test-class9-a-0-1", "student9a011", "{}", "2026-01-15T08:00:00+00:00"))
+            db.execute("INSERT INTO student_analysis_snapshots(id,student_id,class_id,source_test_id,snapshot_at,overall_analysis,overall_rating,subject_ratings_json,metric_ratings_json,subject_analyses_json) VALUES(?,?,?,?,?,?,?,?,?,?)", ("extra-snapshot", "student9a011", "class9-a", "test-class9-a-0-1", "2026-01-15T08:00:00+00:00", "Sample", 5, "{}", "{}", "{}"))
             db.execute("UPDATE users SET name=? WHERE id=?", ("Sample Student A-001", "student9a001"))
             db.execute("UPDATE questions SET prompt=? WHERE id=?", ("Choose the correct response for Mathematics: question 1.", "test-class9-a-0-1-q1"))
             main.seed_school_data(db, main.password_digest, "", "", "schooladmin", "")
@@ -392,12 +463,17 @@ class SchoolApiTests(unittest.TestCase):
             student_name = db.execute("SELECT name FROM users WHERE id=?", ("student9a001",)).fetchone()["name"]
             question_prompt = db.execute("SELECT prompt FROM questions WHERE id=?", ("test-class9-a-0-1-q1",)).fetchone()["prompt"]
             metric_count = db.execute("SELECT COUNT(*) FROM teacher_metrics WHERE class_id=? AND retired_at IS NULL", ("class9-a",)).fetchone()[0]
-            db.execute("DELETE FROM classes WHERE id=?", ("legacy-algebra",))
+            removed_student = db.execute("SELECT COUNT(*) FROM users WHERE id=?", ("student9a011",)).fetchone()[0]
+            removed_attempt = db.execute("SELECT COUNT(*) FROM test_attempts WHERE id=?", ("extra-attempt",)).fetchone()[0]
+            legacy_class = db.execute("SELECT COUNT(*) FROM classes WHERE id=?", ("class9-algebra",)).fetchone()[0]
             db.commit()
         self.assertEqual(class_ids, ["class9-a"])
         self.assertFalse(any(character.isdigit() for character in student_name))
         self.assertEqual(question_prompt, "Solve 3x = 12.")
         self.assertEqual(metric_count, 50)
+        self.assertEqual(removed_student, 0)
+        self.assertEqual(removed_attempt, 0)
+        self.assertEqual(legacy_class, 0)
 
     def test_admin_can_be_bootstrapped_after_demo_seed_marker(self):
         with main.closing(main.connect()) as db:

@@ -8,6 +8,7 @@ SUBJECTS = (
     "Biology", "History", "Geography", "Computer Science", "Art",
 )
 SECTIONS = ("A", "B", "C", "D")
+STUDENTS_PER_CLASS = 10
 TEACHER_NAMES = (
     "Aarav Sharma", "Diya Patel", "Kabir Singh", "Anaya Verma", "Arjun Rao",
     "Meera Nair", "Vivaan Das", "Isha Gupta", "Reyansh Khan", "Saanvi Joshi",
@@ -108,6 +109,93 @@ METRICS = (
     ("Communication", "Presents answers clearly and in an organized way."),
 )
 METRIC_NAMES = tuple(name for name, _ in METRICS)
+OVERALL_ANALYSIS_TEMPLATES = (
+    "The student is making steady progress across assessed subjects and is building reliable study habits. Continued practice with unfamiliar questions can improve consistency.",
+    "The student shows a balanced foundation across the subjects assessed so far. Clear working and regular review should help turn developing knowledge into confident performance.",
+    "The student's results show growing confidence and good recall of familiar ideas. Focusing on multi-step reasoning will strengthen understanding across the curriculum.",
+    "The student is developing a thoughtful approach to learning, with encouraging progress over recent assessments. Checking answers carefully can help reduce avoidable errors.",
+    "The student demonstrates promising understanding across current subjects. Short, regular revision and explaining ideas in their own words should support further progress.",
+)
+SUBJECT_ANALYSIS_TEMPLATES = (
+    "The student shows a sound grasp of core {subject} ideas and explains familiar answers clearly. More practice with unfamiliar problems can build consistency.",
+    "The student applies learned {subject} methods confidently in familiar tasks. Showing each step will make the reasoning easier to follow and review.",
+    "The student is developing understanding in {subject}; several responses show promising reasoning. Revisiting key concepts should improve accuracy.",
+    "The student makes thoughtful connections in {subject} and is becoming more confident. Checking each answer against the question will strengthen precision.",
+    "The student's {subject} knowledge is growing. Guided practice with multi-step questions can help consolidate concepts and explain the method clearly.",
+)
+SUBJECT_ADVICE_TEMPLATES = (
+    "Set aside a short regular practice session, then explain one solution aloud without looking at notes.",
+    "Before submitting, check the question requirements and verify each step of the working.",
+    "Review one key concept at a time and practise applying it to a new example.",
+    "Keep a brief list of challenging questions and revisit them after a few days.",
+    "Use worked examples to check understanding, then solve a similar problem independently.",
+)
+
+
+def _varied_template(templates, key: str) -> str:
+    index = sum((position + 1) * ord(character) for position, character in enumerate(key)) % len(templates)
+    return templates[index]
+
+
+def subject_analysis(subject: str, student_id: str, rating: float) -> dict:
+    key = f"{student_id}:{subject}"
+    return {
+        "analysis": _varied_template(SUBJECT_ANALYSIS_TEMPLATES, key).format(subject=subject),
+        "advice": _varied_template(SUBJECT_ADVICE_TEMPLATES, key + ":advice"),
+        "rating": rating,
+    }
+
+
+def overall_analysis(student_id: str, rating: float) -> str:
+    return _varied_template(OVERALL_ANALYSIS_TEMPLATES, student_id)
+
+
+def _table_exists(db, table_name: str) -> bool:
+    if db.__class__.__name__ == "PostgresConnection":
+        return db.execute("SELECT 1 FROM information_schema.tables WHERE table_schema=current_schema() AND table_name=?", (table_name,)).fetchone() is not None
+    return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table_name,)).fetchone() is not None
+
+
+def _delete_optional_rows(db, table_name: str, column_name: str, values: list[str]) -> None:
+    if values and _table_exists(db, table_name):
+        placeholders = ",".join("?" for _ in values)
+        db.execute(f"DELETE FROM {table_name} WHERE {column_name} IN ({placeholders})", tuple(values))
+
+
+def _delete_student_records(db, student_ids: list[str]) -> None:
+    if not student_ids:
+        return
+    placeholders = ",".join("?" for _ in student_ids)
+    parameters = tuple(student_ids)
+    for table in ("test_analyses", "student_analysis_snapshots", "test_attempts", "profiles", "enrollments"):
+        db.execute(f"DELETE FROM {table} WHERE student_id IN ({placeholders})", parameters)
+    for table in ("mock_advice", "mock_attempts", "submissions"):
+        _delete_optional_rows(db, table, "student_id", student_ids)
+    db.execute(f"DELETE FROM sessions WHERE user_id IN ({placeholders})", parameters)
+    db.execute(f"DELETE FROM users WHERE role='student' AND id IN ({placeholders})", parameters)
+
+
+def _delete_legacy_class(db, class_id: str) -> None:
+    test_ids = [row["id"] for row in db.execute("SELECT id FROM tests WHERE class_id=?", (class_id,)).fetchall()]
+    mock_test_ids = [row["id"] for row in db.execute("SELECT id FROM mock_tests WHERE class_id=?", (class_id,)).fetchall()] if _table_exists(db, "mock_tests") else []
+    for table in ("answer_keys", "submissions", "mock_advice", "mock_attempts", "mock_questions"):
+        _delete_optional_rows(db, table, "test_id", test_ids)
+        _delete_optional_rows(db, table, "test_id", mock_test_ids)
+    if mock_test_ids:
+        db.execute("DELETE FROM mock_tests WHERE class_id=?", (class_id,))
+    for test_id in test_ids:
+        db.execute("DELETE FROM test_analyses WHERE test_id=?", (test_id,))
+        db.execute("DELETE FROM student_analysis_snapshots WHERE source_test_id=?", (test_id,))
+        db.execute("DELETE FROM test_attempts WHERE test_id=?", (test_id,))
+        db.execute("DELETE FROM questions WHERE test_id=?", (test_id,))
+        db.execute("DELETE FROM criteria WHERE test_id=?", (test_id,))
+        db.execute("DELETE FROM tests WHERE id=?", (test_id,))
+    db.execute("DELETE FROM plans WHERE class_id=?", (class_id,))
+    db.execute("DELETE FROM student_analysis_snapshots WHERE class_id=?", (class_id,))
+    db.execute("DELETE FROM teacher_metrics WHERE class_id=?", (class_id,))
+    db.execute("DELETE FROM teacher_assignments WHERE class_id=?", (class_id,))
+    db.execute("DELETE FROM enrollments WHERE class_id=?", (class_id,))
+    db.execute("DELETE FROM classes WHERE id=?", (class_id,))
 
 
 def student_name(section_index: int, student_index: int) -> str:
@@ -131,9 +219,18 @@ def _refresh_seeded_data(db, password_digest, admin_username, admin_password, sa
     student_updates = []
     stale_enrollments = []
     expected_enrollments = []
+    excess_demo_students = [
+        f"student9{section.lower()}{student_index:03d}"
+        for section in SECTIONS
+        for student_index in range(STUDENTS_PER_CLASS + 1, 81)
+    ]
+    _delete_student_records(db, excess_demo_students)
+    legacy_classes = db.execute("SELECT id FROM classes WHERE id=? OR lower(name)=?", ("class9-algebra", "class 9 - algebra")).fetchall()
+    for legacy_class in legacy_classes:
+        _delete_legacy_class(db, legacy_class["id"])
     for section_index, section in enumerate(SECTIONS):
         class_id = f"class9-{section.lower()}"
-        for student_index in range(1, 81):
+        for student_index in range(1, STUDENTS_PER_CLASS + 1):
             username = sample_student_username.strip().lower() if section_index == 0 and student_index == 1 and sample_student_username.strip() else f"student9{section.lower()}{student_index:03d}"
             student_updates.append((student_name(section_index, student_index), username))
             stale_enrollments.append((username, class_id))
@@ -196,10 +293,16 @@ def _refresh_seeded_data(db, password_digest, admin_username, admin_password, sa
         result["metric_ratings"] = metric_ratings
         result["analysis"] = f"The student demonstrated {row['subject'].lower()} knowledge with improving accuracy."
         analysis_updates.append((json.dumps(result), row["id"]))
-        results_by_attempt[(row["test_id"], row["student_id"])] = metric_ratings
+        results_by_attempt[(row["test_id"], row["student_id"])] = {
+            "metrics": metric_ratings,
+            "overall_rating": float(result.get("overall_rating", rating)),
+            "subject": row["subject"],
+            "subject_rating": float(result.get("subject_rating", rating)),
+        }
     db.executemany("UPDATE test_analyses SET result_json=? WHERE id=?", analysis_updates)
 
     metric_history = {}
+    subject_history = {}
     snapshot_updates = []
     snapshots = db.execute("""SELECT s.id,s.student_id,s.class_id,s.source_test_id
         FROM student_analysis_snapshots s JOIN tests t ON t.id=s.source_test_id
@@ -207,10 +310,14 @@ def _refresh_seeded_data(db, password_digest, admin_username, admin_password, sa
     for snapshot in snapshots:
         history_key = (snapshot["student_id"], snapshot["class_id"])
         ratings = metric_history.setdefault(history_key, {})
-        for metric in results_by_attempt.get((snapshot["source_test_id"], snapshot["student_id"]), []):
+        analyses_by_subject = subject_history.setdefault(history_key, {})
+        attempt = results_by_attempt.get((snapshot["source_test_id"], snapshot["student_id"]), {})
+        for metric in attempt.get("metrics", []):
             ratings[metric["metric_id"]] = metric["rating"]
-        snapshot_updates.append((json.dumps(ratings), snapshot["id"]))
-    db.executemany("UPDATE student_analysis_snapshots SET metric_ratings_json=? WHERE id=?", snapshot_updates)
+        if attempt.get("subject"):
+            analyses_by_subject[attempt["subject"]] = subject_analysis(attempt["subject"], snapshot["student_id"], attempt["subject_rating"])
+        snapshot_updates.append((overall_analysis(snapshot["student_id"], attempt.get("overall_rating", 5)), json.dumps(analyses_by_subject), json.dumps(ratings), snapshot["id"]))
+    db.executemany("UPDATE student_analysis_snapshots SET overall_analysis=?,subject_analyses_json=?,metric_ratings_json=? WHERE id=?", snapshot_updates)
 
 
 def seed_school_data(db, password_digest, student_password: str, teacher_password: str, admin_username: str, admin_password: str, sample_student_username: str = "student9a001", sample_teacher_username: str = "teacher01") -> dict:
@@ -245,7 +352,7 @@ def seed_school_data(db, password_digest, student_password: str, teacher_passwor
         classes.append((class_id, class_name))
         db.execute("INSERT INTO classes(id,name,year,teacher_id) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,year=excluded.year", (class_id, class_name, "2026 / 27", None))
         students = []
-        for index in range(1, 81):
+        for index in range(1, STUDENTS_PER_CLASS + 1):
             username = sample_student_username.strip() if section == "A" and index == 1 and sample_student_username.strip() else f"student9{section.lower()}{index:03d}"
             user_id = username.lower()
             name = student_name(section_index, index)
@@ -293,6 +400,7 @@ def seed_school_data(db, password_digest, student_password: str, teacher_passwor
     for class_id, _ in classes:
         subject_ratings_by_student = {student_id: {} for student_id, _, _ in students_by_class[class_id]}
         metric_ratings_by_student = {student_id: {} for student_id, _, _ in students_by_class[class_id]}
+        subject_analyses_by_student = {student_id: {} for student_id, _, _ in students_by_class[class_id]}
         for test_number in range(1, 5):
             for subject_index, subject in enumerate(SUBJECTS):
                 metric_rows = [
@@ -316,12 +424,14 @@ def seed_school_data(db, password_digest, student_password: str, teacher_passwor
                     subject_old = subject_ratings_by_student[student_id].get(subject, test_rating)
                     subject_rating = round((subject_old * (test_number - 1) + test_rating) / test_number, 1)
                     subject_ratings_by_student[student_id][subject] = subject_rating
+                    subject_analyses_by_student[student_id][subject] = subject_analysis(subject, student_id, subject_rating)
                     metric_ratings = {}
                     for metric_index, metric in enumerate(metric_rows):
                         rating = round(max(0, min(10, test_rating + (metric_index - 1) * 0.4)), 1)
                         metric_ratings[metric["id"]] = rating
                         metric_ratings_by_student[student_id][metric["id"]] = rating
                     overall_rating = round(sum(subject_ratings_by_student[student_id].values()) / len(subject_ratings_by_student[student_id]), 1)
+                    overall_text = overall_analysis(student_id, overall_rating)
                     score = round(test_rating, 1)
                     answers = {
                         questions[0]["id"]: 1 if student_index % 5 else 0,
@@ -342,19 +452,19 @@ def seed_school_data(db, password_digest, student_password: str, teacher_passwor
                         "subject_rating": subject_rating,
                         "metric_ratings": [{"metric_id": metric_id, "rating": rating, "evidence": "Generated sample evidence for this assessment."} for metric_id, rating in metric_ratings.items()],
                         "overall_rating": overall_rating,
-                        "overall_analysis": f"Current overall rating {overall_rating}/10 across {len(subject_ratings_by_student[student_id])} assessed subjects.",
+                        "overall_analysis": overall_text,
                         "question_results": [],
                     }
                     attempt_rows.append((attempt_id, test_id, student_id, json.dumps(answers), "analysed", timestamp))
                     analysis_rows.append((f"analysis-{attempt_id}", attempt_id, test_id, student_id, json.dumps(result), timestamp))
-                    snapshot_rows.append((f"snapshot-{attempt_id}", student_id, class_id, test_id, timestamp, result["overall_analysis"], overall_rating, json.dumps(subject_ratings_by_student[student_id]), json.dumps(metric_ratings_by_student[student_id])))
+                    snapshot_rows.append((f"snapshot-{attempt_id}", student_id, class_id, test_id, timestamp, result["overall_analysis"], overall_rating, json.dumps(subject_ratings_by_student[student_id]), json.dumps(metric_ratings_by_student[student_id]), json.dumps(subject_analyses_by_student[student_id])))
                     seeded_attempts += 1
 
     db.executemany("INSERT INTO tests(id,class_id,title,subject,kind,due_date,is_mock,published,created_by) VALUES(?,?,?,?,?,?,0,1,?) ON CONFLICT(id) DO NOTHING", test_rows)
     db.executemany("INSERT INTO questions(id,test_id,prompt,points,question_type,options_json,answer_key,position) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING", question_rows)
     db.executemany("INSERT INTO test_attempts(id,test_id,student_id,answers_json,status,submitted_at,is_mock) VALUES(?,?,?,?,?,?,0) ON CONFLICT(id) DO NOTHING", attempt_rows)
     db.executemany("INSERT INTO test_analyses(id,attempt_id,test_id,student_id,result_json,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(attempt_id) DO NOTHING", analysis_rows)
-    db.executemany("INSERT INTO student_analysis_snapshots(id,student_id,class_id,source_test_id,snapshot_at,overall_analysis,overall_rating,subject_ratings_json,metric_ratings_json) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING", snapshot_rows)
+    db.executemany("INSERT INTO student_analysis_snapshots(id,student_id,class_id,source_test_id,snapshot_at,overall_analysis,overall_rating,subject_ratings_json,metric_ratings_json,subject_analyses_json) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING", snapshot_rows)
 
     for class_id, class_name in classes:
         mock_id = f"mock-general-knowledge-{class_id[-1]}"
