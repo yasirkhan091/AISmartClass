@@ -30,6 +30,7 @@ for variable in (
     os.environ.pop(variable, None)
 
 import main
+from school_seed import _delete_student_records
 
 
 class SchoolApiTests(unittest.TestCase):
@@ -590,6 +591,40 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(removed_student, 0)
         self.assertEqual(removed_attempt, 0)
         self.assertEqual(legacy_class, 0)
+
+    def test_seed_refresh_restores_missing_demo_student_before_enrollment(self):
+        with main.closing(main.connect()) as db:
+            original_renamed_student = db.execute("SELECT username,password_salt,password_hash FROM users WHERE id=?", ("student9b002",)).fetchone()
+            renamed_salt = "retained-renamed-student-salt"
+            renamed_password = "retained-renamed-student-password"
+            db.execute("UPDATE users SET username=?,password_salt=?,password_hash=? WHERE id=?", ("renamed-student", renamed_salt, main.password_digest(renamed_password, renamed_salt), "student9b002"))
+            _delete_student_records(db, ["student9b001"])
+            db.commit()
+            try:
+                result = main.seed_school_data(
+                    db,
+                    main.password_digest,
+                    "restored-student-password",
+                    "restored-teacher-password",
+                    "schooladmin",
+                    "",
+                )
+                restored = db.execute("SELECT id,role FROM users WHERE id=?", ("student9b001",)).fetchone()
+                enrollment = db.execute("SELECT class_id FROM enrollments WHERE student_id=?", ("student9b001",)).fetchone()
+                profile = db.execute("SELECT student_id FROM profiles WHERE student_id=?", ("student9b001",)).fetchone()
+                renamed = db.execute("SELECT username,password_salt,password_hash FROM users WHERE id=?", ("student9b002",)).fetchone()
+            finally:
+                db.execute("UPDATE users SET username=?,password_salt=?,password_hash=? WHERE id=?", (*original_renamed_student, "student9b002"))
+                db.execute("DELETE FROM app_seed_markers WHERE name=?", ("school-demo-v1",))
+                db.commit()
+                main.seed_school_data(db, main.password_digest, "restored-student-password", "restored-teacher-password", "schooladmin", "")
+        self.assertFalse(result["seeded"])
+        self.assertEqual(restored["role"], "student")
+        self.assertEqual(enrollment["class_id"], "class9-b")
+        self.assertEqual(profile["student_id"], "student9b001")
+        self.assertEqual(renamed["username"], "renamed-student")
+        self.assertEqual(renamed["password_salt"], renamed_salt)
+        self.assertEqual(renamed["password_hash"], main.password_digest(renamed_password, renamed_salt))
 
     def test_admin_can_be_bootstrapped_after_demo_seed_marker(self):
         with main.closing(main.connect()) as db:

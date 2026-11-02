@@ -249,7 +249,22 @@ def student_name(section_index: int, student_index: int) -> str:
     return f"{first} {STUDENT_LAST_NAMES[surname_index]}"
 
 
-def _refresh_seeded_data(db, password_digest, admin_username, admin_password, sample_student_username, sample_teacher_username):
+def _ensure_demo_user(db, password_digest, user_id: str, name: str, role: str, password: str) -> str:
+    existing = db.execute("SELECT id,role FROM users WHERE id=?", (user_id,)).fetchone()
+    if existing:
+        if existing["role"] != role:
+            raise ValueError(f"Seed account {user_id} has unexpected role {existing['role']}")
+        return existing["id"]
+    existing = db.execute("SELECT id,role FROM users WHERE lower(username)=lower(?)", (user_id,)).fetchone()
+    if existing:
+        if existing["role"] != role:
+            raise ValueError(f"Seed username {user_id} has unexpected role {existing['role']}")
+        return existing["id"]
+    _upsert_user(db, password_digest, user_id, name, role, password)
+    return user_id.lower()
+
+
+def _refresh_seeded_data(db, password_digest, student_password, teacher_password, admin_username, admin_password, sample_student_username, sample_teacher_username):
     if admin_password:
         _upsert_user(db, password_digest, admin_username, admin_username, "teacher", admin_password, True)
 
@@ -257,13 +272,15 @@ def _refresh_seeded_data(db, password_digest, admin_username, admin_password, sa
     teacher_updates = []
     for teacher_index, name in enumerate(TEACHER_NAMES, start=1):
         username = sample_teacher_username.strip().lower() if teacher_index == 1 and sample_teacher_username.strip() else f"teacher{teacher_index:02d}"
-        teacher_ids.append(username)
-        teacher_updates.append((name, username))
+        teacher_id = _ensure_demo_user(db, password_digest, username, name, "teacher", teacher_password)
+        teacher_ids.append(teacher_id)
+        teacher_updates.append((name, teacher_id))
     db.executemany("UPDATE users SET name=? WHERE id=? AND role='teacher' AND is_admin=0", teacher_updates)
 
     student_updates = []
     stale_enrollments = []
     expected_enrollments = []
+    profile_rows = []
     excess_demo_students = [
         f"student9{section.lower()}{student_index:03d}"
         for section in SECTIONS
@@ -277,10 +294,14 @@ def _refresh_seeded_data(db, password_digest, admin_username, admin_password, sa
         class_id = f"class9-{section.lower()}"
         for student_index in range(1, STUDENTS_PER_CLASS + 1):
             username = sample_student_username.strip().lower() if section_index == 0 and student_index == 1 and sample_student_username.strip() else f"student9{section.lower()}{student_index:03d}"
-            student_updates.append((student_name(section_index, student_index), username))
-            stale_enrollments.append((username, class_id))
-            expected_enrollments.append((class_id, username))
+            name = student_name(section_index, student_index)
+            student_id = _ensure_demo_user(db, password_digest, username, name, "student", student_password)
+            student_updates.append((name, student_id))
+            stale_enrollments.append((student_id, class_id))
+            expected_enrollments.append((class_id, student_id))
+            profile_rows.append((student_id, json.dumps({"class": f"Class 9 Section {section}", "strengths": [], "focus_areas": []})))
     db.executemany("UPDATE users SET name=? WHERE id=? AND role='student'", student_updates)
+    db.executemany("INSERT INTO profiles(student_id,context_json) VALUES(?,?) ON CONFLICT(student_id) DO NOTHING", profile_rows)
     db.executemany("DELETE FROM enrollments WHERE student_id=? AND class_id<>?", stale_enrollments)
     db.executemany("INSERT INTO enrollments(class_id,student_id) VALUES(?,?) ON CONFLICT DO NOTHING", expected_enrollments)
 
@@ -369,7 +390,7 @@ def _refresh_seeded_data(db, password_digest, admin_username, admin_password, sa
 
 def seed_school_data(db, password_digest, student_password: str, teacher_password: str, admin_username: str, admin_password: str, sample_student_username: str = "student9a001", sample_teacher_username: str = "teacher01") -> dict:
     if db.execute("SELECT 1 FROM app_seed_markers WHERE name=?", ("school-demo-v1",)).fetchone():
-        _refresh_seeded_data(db, password_digest, admin_username, admin_password, sample_student_username, sample_teacher_username)
+        _refresh_seeded_data(db, password_digest, student_password, teacher_password, admin_username, admin_password, sample_student_username, sample_teacher_username)
         db.commit()
         return {"seeded": False, "admin_seeded": bool(admin_password)}
 
