@@ -308,7 +308,7 @@ def ai_provider() -> str:
 def model_for_provider(provider: str | None = None) -> str:
     provider = provider or ai_provider()
     if provider == "openrouter":
-        return os.getenv("OPEN_ROUTER_MODEL") or "nvidia/nemotron-3-super-120b-a12b:free"
+        return os.getenv("OPEN_ROUTER_MODEL") or "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
     return os.getenv("OPENAI_MODEL") or "gpt-4.1-mini"
 
 
@@ -347,13 +347,14 @@ def get_structured_test_analysis(context: str, subjective_max_score: float, metr
     primary_model = model_for_provider(provider)
     fallback_model = os.getenv("OPEN_ROUTER_FALLBACK_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free").strip()
     models = list(dict.fromkeys(model for model in (primary_model, fallback_model) if model))
-    instructions = "You are a careful teacher. The input contains JSON. Grade subjective responses only; MCQ points have already been validated. Compare each answer to the answer key and allow equivalent reasoning. Use prior state and metric definitions to assess progress. Return only JSON with subjective_score, test_rating (0-10), analysis, strengths (array), focus_areas (array), advice, subject_rating (0-10), metric_ratings (one object per requested metric with metric_id, rating 0-10, evidence), overall_rating (0-10), and overall_analysis. Never include private cumulative ratings in student advice."
+    instructions = "You are a careful teacher. The input contains JSON. Grade subjective responses only; MCQ points have already been validated. Compare each answer to the key and accept equivalent reasoning. Use prior state and metric definitions. Return only JSON with subjective_score, test_rating (0-10), analysis (1-2 concise sentences), strengths (up to 3 short strings), focus_areas (up to 3 short strings), advice (one actionable sentence), subject_rating (0-10), metric_ratings (one object per requested metric with metric_id, rating 0-10, concise evidence), overall_rating (0-10), and overall_analysis (1 concise sentence). Never include private cumulative ratings in student advice."
     body = {
         "messages": [
             {"role": "system", "content": instructions},
             {"role": "user", "content": "Return a json object matching required_output. Assessment context:\n" + context},
         ],
         "response_format": {"type": "json_object"},
+        "max_tokens": 700,
         "temperature": 0.1,
     }
     headers = {

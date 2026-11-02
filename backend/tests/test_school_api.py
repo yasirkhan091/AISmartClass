@@ -239,7 +239,7 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(models, ["primary-model", "nvidia/nemotron-3-ultra-550b-a55b:free"])
         self.assertEqual(result["subjective_score"], 2)
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(main.model_for_provider(), "nvidia/nemotron-3-super-120b-a12b:free")
+            self.assertEqual(main.model_for_provider(), "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free")
 
     def test_failed_mock_analysis_returns_error_without_saving_attempt(self):
         test_id = "mock-general-knowledge-b"
