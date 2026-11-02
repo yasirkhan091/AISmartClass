@@ -22,7 +22,9 @@ services:
       - key: OPEN_ROUTER_API_KEY
         sync: false
       - key: OPEN_ROUTER_MODEL
-        value: openrouter/free
+        value: nvidia/nemotron-3-super-120b-a12b:free
+      - key: OPEN_ROUTER_FALLBACK_MODEL
+        value: nvidia/nemotron-3-ultra-550b-a55b:free
       - key: ADMIN_USERNAME
         value: schooladmin
       - key: ADMIN_PASSWORD

@@ -236,8 +236,10 @@ class SchoolApiTests(unittest.TestCase):
             with patch("main.urllib.request.urlopen", side_effect=[FakeResponse("not json"), FakeResponse(json.dumps(valid))]) as request:
                 result = main.get_structured_test_analysis("{}", 5, [])
         models = [json.loads(call.args[0].data)["model"] for call in request.call_args_list]
-        self.assertEqual(models, ["primary-model", "nvidia/nemotron-3-super-120b-a12b:free"])
+        self.assertEqual(models, ["primary-model", "nvidia/nemotron-3-ultra-550b-a55b:free"])
         self.assertEqual(result["subjective_score"], 2)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(main.model_for_provider(), "nvidia/nemotron-3-super-120b-a12b:free")
 
     def test_failed_mock_analysis_returns_error_without_saving_attempt(self):
         test_id = "mock-general-knowledge-b"
@@ -315,7 +317,7 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(payload["student_id"], "student9b001")
         self.assertEqual(payload["answers"][question_ids[0]], 1)
         self.assertEqual(payload["answers"][question_ids[1]], "My reasoning works.")
-        self.assertEqual(payload["attempts"][0]["student_name"], "Aanya Rao")
+        self.assertEqual(payload["attempts"][0]["student_name"], "Meera Roy")
         self.assertEqual(payload["attempts"][0]["result"]["analysis"], "Strong understanding.")
         all_attempts = self.client.get(f"/api/tests/{test_id}/attempts")
         self.assertEqual(all_attempts.status_code, 200, all_attempts.text)
@@ -548,6 +550,8 @@ class SchoolApiTests(unittest.TestCase):
             student_names = [row["name"] for row in db.execute("SELECT name FROM users WHERE role='student' AND username LIKE 'student9%'")]
             self.assertEqual(len(set(student_names)), 40)
             self.assertFalse(any(any(character.isdigit() for character in name) for name in student_names))
+            section_a_surnames = [row["name"].split()[-1] for row in db.execute("SELECT name FROM users WHERE id LIKE 'student9a%' ORDER BY id")]
+            self.assertEqual(len(set(section_a_surnames)), 10)
             teacher_names = [row["name"] for row in db.execute("SELECT name FROM users WHERE role='teacher' AND username LIKE 'teacher%'")]
             self.assertEqual(len(set(teacher_names)), 20)
             self.assertFalse(any(any(character.isdigit() for character in name) for name in teacher_names))

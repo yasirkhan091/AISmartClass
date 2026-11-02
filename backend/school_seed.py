@@ -244,8 +244,10 @@ def _delete_legacy_class(db, class_id: str) -> None:
 
 
 def student_name(section_index: int, student_index: int) -> str:
-    first = STUDENT_FIRST_NAMES[(student_index - 1) % len(STUDENT_FIRST_NAMES)]
-    surname_index = ((student_index - 1) // len(STUDENT_FIRST_NAMES) + section_index * 4) % len(STUDENT_LAST_NAMES)
+    first_index = (student_index - 1 + (section_index % 2) * STUDENTS_PER_CLASS) % len(STUDENT_FIRST_NAMES)
+    surname_group = (section_index // 2 + section_index) % 2
+    surname_index = (student_index - 1 + surname_group * STUDENTS_PER_CLASS) % len(STUDENT_LAST_NAMES)
+    first = STUDENT_FIRST_NAMES[first_index]
     return f"{first} {STUDENT_LAST_NAMES[surname_index]}"
 
 
