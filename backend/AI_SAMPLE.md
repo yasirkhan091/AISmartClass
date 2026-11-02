@@ -1,6 +1,6 @@
 # Structured Assessment AI Sample
 
-The assessment path calls `build_analysis_context` and sends the resulting compact JSON string to OpenRouter's Chat Completions API. It requests `response_format: {"type":"json_object"}` and validates the JSON before storing it. MCQs are scored by the backend; the model scores subjective questions only.
+The assessment path calls `build_analysis_context` and sends the resulting compact JSON string to OpenRouter's Chat Completions API. It requests `response_format: {"type":"json_object"}`, caps hidden reasoning at 256 tokens, and allows up to 2,048 completion tokens so reasoning cannot consume the whole response budget. The prompt explicitly requires one JSON object directly, not a quoted/escaped JSON string or prose. The backend rejects responses stopped by the token limit and validates the JSON before storing it. MCQs are scored by the backend; the model scores subjective questions only.
 
 ## Sample Prompt
 

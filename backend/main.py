@@ -347,14 +347,15 @@ def get_structured_test_analysis(context: str, subjective_max_score: float, metr
     primary_model = model_for_provider(provider)
     fallback_model = os.getenv("OPEN_ROUTER_FALLBACK_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free").strip()
     models = list(dict.fromkeys(model for model in (primary_model, fallback_model) if model))
-    instructions = "You are a careful teacher. The input contains JSON. Grade subjective responses only; MCQ points have already been validated. Compare each answer to the key and accept equivalent reasoning. Use prior state and metric definitions. Return only JSON with subjective_score, test_rating (0-10), analysis (1-2 concise sentences), strengths (up to 3 short strings), focus_areas (up to 3 short strings), advice (one actionable sentence), subject_rating (0-10), metric_ratings (one object per requested metric with metric_id, rating 0-10, concise evidence), overall_rating (0-10), and overall_analysis (1 concise sentence). Never include private cumulative ratings in student advice."
+    instructions = "You are a careful teacher. The input contains JSON. Grade subjective responses only; MCQ points have already been validated. Compare each answer to the key and accept equivalent reasoning. Use prior state and metric definitions. Output exactly one JSON object directly, not a quoted or escaped JSON string. Do not include markdown or any text outside the object. Keep every text field concise; strengths and focus_areas may have up to 3 short strings, and metric evidence must be one short sentence. Return subjective_score, test_rating (0-10), analysis (1-2 concise sentences), strengths, focus_areas, advice (one actionable sentence), subject_rating (0-10), metric_ratings (exactly one object for each supplied teacher metric, using its metric_id; return an empty array if no teacher metrics are supplied), overall_rating (0-10), and overall_analysis (1 concise sentence). Never include private cumulative ratings in student advice."
     body = {
         "messages": [
             {"role": "system", "content": instructions},
             {"role": "user", "content": "Return a json object matching required_output. Assessment context:\n" + context},
         ],
         "response_format": {"type": "json_object"},
-        "max_tokens": 700,
+        "reasoning": {"max_tokens": 256, "exclude": True},
+        "max_tokens": 2048,
         "temperature": 0.1,
     }
     headers = {
@@ -371,7 +372,10 @@ def get_structured_test_analysis(context: str, subjective_max_score: float, metr
         try:
             with urllib.request.urlopen(request, timeout=35) as response:
                 payload = json.loads(response.read())
-            result = parse_openrouter_analysis_content(payload["choices"][0]["message"])
+            choice = payload["choices"][0]
+            if choice.get("finish_reason") == "length":
+                raise ValueError("OpenRouter response reached its output token limit")
+            result = parse_openrouter_analysis_content(choice["message"])
             return validate_analysis_result(result, subjective_max_score, metrics)
         except urllib.error.HTTPError as error:
             logger.warning("OpenRouter model %s returned HTTP %s", model, error.code)

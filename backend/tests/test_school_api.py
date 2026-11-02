@@ -160,6 +160,13 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(request_object.get_header("Authorization"), "Bearer unit-test-key")
         self.assertEqual(body["model"], "openrouter/free")
         self.assertEqual(body["response_format"]["type"], "json_object")
+        self.assertEqual(body["reasoning"], {"max_tokens": 256, "exclude": True})
+        self.assertEqual(body["max_tokens"], 2048)
+        instructions = body["messages"][0]["content"]
+        self.assertIn("exactly one JSON object", instructions)
+        self.assertIn("not a quoted or escaped JSON string", instructions)
+        self.assertIn("Do not include markdown", instructions)
+        self.assertIn("return an empty array if no teacher metrics are supplied", instructions)
         self.assertIn("json", body["messages"][1]["content"])
         self.assertIn("required_output", body["messages"][1]["content"])
         self.assertEqual(parsed["subjective_score"], 2)
@@ -172,6 +179,8 @@ class SchoolApiTests(unittest.TestCase):
         self.assertEqual(main.parse_openrouter_analysis_content({"content": {"type": "text", "text": encoded}}), expected)
         self.assertEqual(main.parse_openrouter_analysis_content({"content": [{"type": "text", "text": encoded}]}), expected)
         self.assertEqual(main.parse_openrouter_analysis_content({"content": f"```json\n{encoded}\n```"}), expected)
+        with self.assertRaises(ValueError):
+            main.parse_openrouter_analysis_content({"content": json.dumps(encoded)})
 
     def test_openrouter_invalid_output_and_transport_failures_are_retryable(self):
         class FakeResponse:
@@ -203,7 +212,17 @@ class SchoolApiTests(unittest.TestCase):
             metrics = [dict(row) for row in db.execute("SELECT id FROM teacher_metrics WHERE class_id=? AND subject=? AND retired_at IS NULL", ("class9-b", "Mathematics"))]
         valid = self._fake_analysis()
         valid["subjective_score"] = 2
-        responses = [FakeResponse("not json"), FakeResponse(json.dumps(valid))]
+        truncated_response = json.dumps({
+            "choices": [{
+                "message": {"content": json.dumps(valid)},
+                "finish_reason": "length",
+            }]
+        }).encode()
+
+        class TruncatedResponse(FakeResponse):
+            def read(self): return truncated_response
+
+        responses = [TruncatedResponse(""), FakeResponse(json.dumps(valid))]
         with patch.dict(os.environ, {"AI_PROVIDER": "openrouter", "OPEN_ROUTER_API_KEY": "unit-test-key", "OPEN_ROUTER_MODEL": "primary-model", "OPEN_ROUTER_FALLBACK_MODEL": "fallback-model"}):
             with patch("main.urllib.request.urlopen", side_effect=responses) as request:
                 result = main.get_structured_test_analysis("{}", 5, metrics)
