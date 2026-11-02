@@ -107,3 +107,45 @@ RESTARTING THIS TASK
 5. Commit/push only intended source, handoff, and APK files; never stage secrets
     or the preserved PDFs/sample file.
 6. Verify Render `/api/health`, role logins, and the deployed commit.
+
+CURRENT HANDOFF (2026-11-02)
+----------------------------
+Latest pushed source commit before the in-progress crash-hardening edit:
+175a6cf ("Use faster free Nvidia model for analysis"). Render's auto-deploy
+was disabled; the environment setting OPEN_ROUTER_MODEL was manually updated
+to nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free. The fallback is
+nvidia/nemotron-3-ultra-550b-a55b:free. The latest observed Render health is
+status=ok, ai_configured=true, provider=openrouter, model=nvidia/nemotron-3-
+nano-omni-30b-a3b-reasoning:free.
+
+The 2026-10-31 deploy failure was caused by seed refresh inserting enrollment
+rows for student9b001 after that user row had been removed. Commit dc08d5c
+recreates missing seeded teacher/student accounts before restoring profiles and
+enrollments, while retaining usernames/passwords for seeded users whose IDs
+still exist. This was applied to Neon and verified read-only: student9b001 is
+present and enrolled in class9-b. Admin username/password edits update columns
+on the existing ID; those edits alone do not cause the foreign-key failure.
+
+Seeded student names now vary by student and section. Neon Class 9 A was
+verified to contain 10 students, 10 unique full names, and 10 distinct
+surnames. The backend suite last passed with 28 tests.
+
+OpenRouter was exercised with a single live test per candidate. Nvidia
+nemotron-3-super-120b-a12b:free passed the Smartclass schema once at 16.28s;
+nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free passed once at 5.87s; the
+Nvidia Ultra free fallback also passed once. One production mock submission
+using Super returned HTTP 200 in 18.97s with analysis/advice. The faster Nano
+model is now the primary; avoid extra provider requests unless specifically
+needed.
+
+Current user report: the app still crashes a few seconds after mock submission.
+No ADB/device crash log is available. Current uncommitted edits in
+ClassroomActivity.kt replace an unsafe exam!! callback with a null-safe one and
+guard ResultPanel against malformed/incomplete score/analysis values. Current
+uncommitted SmartclassApi.kt edits validate the submission JSON result and
+convert bad payloads to retryable IOExceptions. The last Gradle build was
+cancelled by the user, so these two edits are not yet build-verified or pushed.
+Next: run ./gradlew assembleDebug; fix any compile issue; consider adding a
+focused test if practical; then commit/push the two source files and APK. Do
+not use ADB; user has none. Do not make additional OpenRouter calls without
+need. Preserve existing untracked PDFs, backend/sample.py, and cache files.

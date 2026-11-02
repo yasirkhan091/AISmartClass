@@ -70,8 +70,18 @@ internal class SmartclassApi(baseUrl: String, private val token: String? = null)
 
     fun publishTest(testId: String): JSONObject = requestJson("/api/tests/$testId/publish", "POST", JSONObject())
 
-    fun submitTest(testId: String, answers: JSONObject, isMock: Boolean): JSONObject =
-        requestJson("/api/tests/$testId/attempts", "POST", JSONObject().put("answers", answers).put("is_mock", isMock))
+    fun submitTest(testId: String, answers: JSONObject, isMock: Boolean): JSONObject {
+        val result = requestJson("/api/tests/$testId/attempts", "POST", JSONObject().put("answers", answers).put("is_mock", isMock))
+        val score = result.optDouble("score", Double.NaN)
+        val maxScore = result.optDouble("max_score", Double.NaN)
+        if (!score.isFinite() || !maxScore.isFinite() || score < 0 || maxScore <= 0 || score > maxScore) {
+            throw IOException("The server returned an invalid test result. Please retry the analysis.")
+        }
+        if (result.optString("analysis").isBlank() || result.optString("advice").isBlank()) {
+            throw IOException("The server returned incomplete analysis. Please retry the analysis.")
+        }
+        return result
+    }
 
     fun createPlan(classId: String, week: String, title: String, target: String): JSONObject =
         requestJson("/api/classes/$classId/plans", "POST", JSONObject()

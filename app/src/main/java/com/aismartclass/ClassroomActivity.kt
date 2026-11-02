@@ -337,7 +337,7 @@ private fun SmartclassRoot(context: Context) {
                     submissionProgress = submissionProgress,
                     startedAtMillis = examStartedAtMillis,
                     onAnswer = { id, value -> answers[id] = value },
-                    onSubmit = { currentAnswers -> submitExam(current, exam!!, currentAnswers) },
+                    onSubmit = { currentAnswers -> exam?.let { selected -> submitExam(current, selected, currentAnswers) } },
                     onExit = { exam = null; questions = emptyList(); answers.clear(); savedAttemptPending = false }
                 )
                 result != null && !showSubmissionResult -> SubmissionProgressPanel(submissionStage, submissionProgress)
@@ -847,6 +847,17 @@ private fun SubmissionProgressPanel(stage: String, progress: Float, modifier: Mo
 private fun ResultPanel(result: JSONObject, mock: Boolean, onHome: () -> Unit) {
     val score = result.optDouble("score")
     val maxScore = result.optDouble("max_score")
+    if (!score.isFinite() || !maxScore.isFinite() || maxScore <= 0 || score < 0 || score > maxScore || result.optString("analysis").isBlank() || result.optString("advice").isBlank()) {
+        Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text("Analysis unavailable", color = Ink, fontSize = 24.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold)
+            Text("The server response was incomplete or invalid. Your app is still usable; return home and retry the analysis.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Button(onClick = onHome, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Teal)) {
+                Icon(Icons.Default.Home, contentDescription = null, tint = Color.White)
+                Text("  Back to home", color = Color.White)
+            }
+        }
+        return
+    }
     Column(Modifier.fillMaxSize()) {
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth(),
